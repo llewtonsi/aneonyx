@@ -1,6 +1,6 @@
 # ⌘ VixLauncher
 
-A minimal Android home launcher with a **Linux terminal-inspired interface**.
+A minimal Android home launcher with a **clean, terminal-style interface**.
 
 VixLauncher brings a shell-like prompt, a fast text-first app list, and a collapsible system readout to your Android home screen. The prompt uses the device's available user and device names instead of a hard-coded identity.
 
@@ -8,7 +8,7 @@ VixLauncher brings a shell-like prompt, a fast text-first app list, and a collap
   <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="VixLauncher app icon" width="144">
 </p>
 
-> **A home screen with an Arch-inspired feel, built for Android.**
+> **A focused, text-first home screen for Android.**
 
 ---
 
