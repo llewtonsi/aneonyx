@@ -26,9 +26,23 @@ android {
     }
 }
 
+// Keep Android Gradle Plugin's standard output for tooling, and also create a
+// product-named APK that is easier to find and share.
+val copyDebugApk = tasks.register<Copy>("copyDebugApk") {
+    from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+    into(layout.buildDirectory.dir("outputs/vixlauncher"))
+    rename { "VixLauncher.apk" }
+}
+
+tasks.configureEach {
+    if (name == "assembleDebug") {
+        finalizedBy(copyDebugApk)
+    }
+}
+
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions {
-        jvmTarget = "17"
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
