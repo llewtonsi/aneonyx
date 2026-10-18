@@ -35,7 +35,7 @@ val copyDebugApk = tasks.register<Copy>("copyDebugApk") {
 }
 
 tasks.configureEach {
-    if (name == "assembleDebug") {
+    if (name == "packageDebug") {
         finalizedBy(copyDebugApk)
     }
 }
