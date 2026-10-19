@@ -19,6 +19,11 @@ VixLauncher brings a shell-like prompt, a fast text-first app list, a collapsibl
 * A shell-style prompt that reads the available Android profile name and device name
 * Text-first app rows without app icons
 * Live app count and a search field for filtering installed apps
+* Local terminal commands from the search field: `/clear`, `/gc`, `/time`, `/sysinfo`, `/pkg`, `/clip`, `/dnd`, `/ls`, `/cd`, `/cat`, `/history`, `/layout`, and `/help`
+* A bounded file browser for storage locations Android makes available to the app: `/ls [subfolder]`, `/cd <directory>`, and `/cat <filename>` (first 20 lines; files over 1 MiB are declined)
+* The last 20 successful slash commands persist locally; `/history clear` deletes the saved history
+* `/layout grid` and `/layout list` switch between a three-column app grid and the compact list, with the choice saved across launches
+* Tap the RAM readout or run `/gc` to request garbage collection for VixLauncher's app process and refresh its telemetry
 * Apps grouped under sticky alphabetical headings, with a draggable A–Z rail that jumps to the nearest available section
 * Press the keyboard's **Search** action to open the first matching app
 * Long-press an app to open its Android app info page
@@ -35,7 +40,11 @@ Open the panel's **INFO** section to view device readouts:
 * ⚙️ CPU load average and available core count
 * 🌐 Device-wide network receive and transmit rates
 
-The panel stays idle while collapsed and samples while expanded and visible. Network rates are based on device-wide traffic counters. The CPU bar is a normalized load-average estimate, not a direct CPU utilization reading.
+The panel stays idle while collapsed and samples while expanded and visible. All system readings refresh every three seconds while the panel is expanded and visible. Network rates are based on device-wide traffic counters. The CPU bar is a normalized load-average estimate, not a direct CPU utilization reading.
+
+Terminal commands run only when you press the keyboard's **Search** action. `/help` describes each command. Garbage collection requests apply to VixLauncher's managed app memory; Android continues to manage system RAM and caches. `/dnd` requires notification-policy access in Android Settings; use Android Quick Settings when you need a timed DND session.
+
+Android's scoped-storage rules may prevent direct file access to shared storage on newer Android versions. The file commands report inaccessible paths instead of requesting broad all-files access; use Android's file picker for locations protected by the system. Directory output is capped at 200 entries, and file previews at 20 lines/1 MiB to limit memory use. Actual launcher memory use depends on Android, the device, wallpaper size, and installed apps, so a fixed RAM ceiling cannot be guaranteed.
 
 ---
 

@@ -1,7 +1,10 @@
 package com.example.minilauncher
 
 import android.app.ActivityManager
+import android.app.NotificationManager
 import android.app.WallpaperManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -17,6 +20,9 @@ import android.os.StatFs
 import android.os.SystemClock
 import android.os.UserManager
 import android.provider.Settings
+import android.hardware.display.DisplayManager
+import android.util.DisplayMetrics
+import android.view.Display
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -40,6 +46,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -47,6 +54,11 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -81,6 +93,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -94,8 +107,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 // ───────────────────────────── Activity ─────────────────────────────
@@ -137,6 +154,53 @@ private val RED = Color(0xFFFF2A6D)
 private val DIM = Color(0xFF858B98)
 private val TEXT = Color(0xFFE0E0E0)
 private val ALPHABET = ('A'..'Z').toList() + '#'
+private val COMMAND_HELP = """AVAILABLE COMMANDS
+/clear, /gc
+  Request garbage collection for VixLauncher's app memory and refresh its RAM stats.
+/time
+  Show the current local time.
+/sysinfo
+  Show device, Android, CPU ABI, and display information.
+/pkg <query>
+  Open Android App Info for the first matching launcher app.
+/clip [clear]
+  Show plain-text clipboard contents, or clear the clipboard.
+/dnd [minutes]
+  Toggle Do Not Disturb. Use Android Quick Settings to set a timed session.
+/ls [subfolder]
+  List files and folders in the current directory or a relative subfolder.
+/cd <directory>
+  Change directory. Use /cd .. to move up one directory.
+/cat <filename>
+  Show the first 20 lines of a text file up to 1 MiB.
+/history [clear]
+  Show the last 20 successful commands, or clear the saved history.
+/layout <grid|list>
+  Switch the app drawer layout and save your choice.
+/help
+  Show this command list.
+
+GC requests affect only VixLauncher's app memory. Android manages system RAM and caches."""
+
+private val HELP_COMMAND_TOKENS = listOf(
+    "/clear", "/gc", "/time", "/sysinfo", "/pkg", "/clip", "/dnd",
+    "/ls", "/cd", "/cat", "/history", "/layout", "/help",
+)
+
+private const val PREFS_NAME = "vixlauncher_preferences"
+private const val PREF_COMMAND_HISTORY = "command_history"
+private const val PREF_GRID_LAYOUT = "grid_layout"
+private const val MAX_COMMAND_HISTORY = 20
+private const val MAX_LISTING_ENTRIES = 200
+private const val MAX_TEXT_FILE_BYTES = 1024L * 1024L
+
+private data class CommandResult(
+    val output: String,
+    val success: Boolean = true,
+    val newPath: String? = null,
+    val clearHistory: Boolean = false,
+    val newGridLayout: Boolean? = null,
+)
 
 private val Mono = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp)
 
@@ -211,11 +275,226 @@ private fun launchApp(ctx: Context, app: AppEntry) {
     runCatching { ctx.startActivity(intent) }
 }
 
-private fun openAppInfo(ctx: Context, packageName: String) {
+private fun openAppInfo(ctx: Context, packageName: String): Boolean {
     val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
         .setData(Uri.fromParts("package", packageName, null))
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    runCatching { ctx.startActivity(intent) }
+    return runCatching {
+        ctx.startActivity(intent)
+        true
+    }.getOrDefault(false)
+}
+
+private fun findAppMatch(apps: List<AppEntry>, query: String): AppEntry? {
+    val normalized = query.trim().lowercase(Locale.ROOT)
+    if (normalized.isEmpty()) return null
+    return apps.firstOrNull { it.packageName.equals(normalized, ignoreCase = true) }
+        ?: apps.firstOrNull { it.searchLabel == normalized }
+        ?: apps.firstOrNull {
+            it.searchLabel.contains(normalized) || it.packageName.lowercase(Locale.ROOT).contains(normalized)
+        }
+}
+
+private fun deviceInfo(ctx: Context): String {
+    val display = ctx.getSystemService(DisplayManager::class.java)
+        ?.getDisplay(Display.DEFAULT_DISPLAY)
+    val metrics = DisplayMetrics()
+    if (display != null) {
+        @Suppress("DEPRECATION")
+        display.getRealMetrics(metrics)
+    }
+    val resolution = if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+        "${metrics.widthPixels} × ${metrics.heightPixels}px"
+    } else "unavailable"
+    val refreshRate = display?.refreshRate?.let { "%.1f Hz".format(Locale.ROOT, it) } ?: "unavailable"
+    val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: System.getProperty("os.arch", "unknown")
+    return """DEVICE  ${Build.MANUFACTURER} ${Build.MODEL}
+ANDROID ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})
+CPU ABI $abi
+DISPLAY $resolution @ $refreshRate
+KERNEL  ${System.getProperty("os.version", "unknown")}"""
+}
+
+private fun clipboardCommand(ctx: Context, argument: String): String {
+    val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    if (argument.equals("clear", ignoreCase = true)) {
+        if (Build.VERSION.SDK_INT >= 28) {
+            clipboard.clearPrimaryClip()
+        } else {
+            clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+        }
+        return "Clipboard cleared."
+    }
+    if (argument.isNotBlank()) return "Usage: /clip [clear]"
+    val clip = clipboard.primaryClip ?: return "Clipboard is empty or unavailable."
+    val text = (0 until clip.itemCount)
+        .mapNotNull { clip.getItemAt(it).text?.toString() }
+        .joinToString("\n")
+    if (text.isEmpty()) return "Clipboard has no plain-text content."
+    val maxChars = 1_200
+    return if (text.length > maxChars) text.take(maxChars) + "… [truncated]" else text
+}
+
+private fun dndCommand(ctx: Context, argument: String): String {
+    if (argument.isNotBlank()) {
+        val minutes = argument.toIntOrNull()
+        if (minutes == null || minutes !in 1..1_440) return "Usage: /dnd [minutes] (1–1440)"
+        return "Timed DND can't be safely scheduled here. Use Android Quick Settings to choose a duration."
+    }
+
+    val notificationManager = ctx.getSystemService(NotificationManager::class.java)
+        ?: return "Do Not Disturb service is unavailable."
+    if (!notificationManager.isNotificationPolicyAccessGranted) {
+        return try {
+            ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
+            "Grant VixLauncher notification-policy access, then run /dnd again."
+        } catch (_: Exception) {
+            "Couldn't open notification-policy settings. Open them from Android Settings."
+        }
+    }
+
+    val currentlyAll = notificationManager.currentInterruptionFilter ==
+        NotificationManager.INTERRUPTION_FILTER_ALL
+    val target = if (currentlyAll) NotificationManager.INTERRUPTION_FILTER_NONE
+    else NotificationManager.INTERRUPTION_FILTER_ALL
+    notificationManager.setInterruptionFilter(target)
+    return if (currentlyAll) "Do Not Disturb enabled." else "Do Not Disturb disabled."
+}
+
+private fun fileRoot(): File = Environment.getExternalStorageDirectory().canonicalFile
+
+private fun resolveExplorerPath(currentPath: String, requested: String): File {
+    val root = fileRoot()
+    val candidate = if (requested.isBlank()) File(currentPath) else {
+        val requestedFile = File(requested)
+        if (requestedFile.isAbsolute) requestedFile else File(currentPath, requested)
+    }.canonicalFile
+    val rootPath = root.path
+    require(candidate.path == rootPath || candidate.path.startsWith(rootPath + File.separator)) {
+        "Path is outside shared storage."
+    }
+    return candidate
+}
+
+private fun listDirectory(path: File): String {
+    if (!path.exists() || !path.isDirectory) return "Directory not found: ${path.path}"
+    val entries = path.listFiles() ?: return "Directory unreadable: ${path.path}"
+    if (entries.isEmpty()) return "(empty directory)\n${path.path}"
+    val shown = entries.take(MAX_LISTING_ENTRIES)
+        .sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase(Locale.ROOT) }))
+    val lines = shown.map { file -> "${if (file.isDirectory) "[DIR]" else "[FILE]"} ${file.name}" }
+    val suffix = if (entries.size > shown.size) "\n… ${entries.size - shown.size} more entries omitted" else ""
+    return "${path.path}\n${lines.joinToString("\n")}$suffix"
+}
+
+private fun readTextPreview(path: File): String {
+    if (!path.exists() || !path.isFile) return "File not found: ${path.path}"
+    if (!path.canRead()) return "File unreadable: ${path.name}"
+    if (path.length() > MAX_TEXT_FILE_BYTES) return "File too large; /cat is limited to 1 MiB."
+    return try {
+        val output = ArrayList<String>(20)
+        BufferedReader(InputStreamReader(path.inputStream(), Charsets.UTF_8)).use { reader ->
+            repeat(20) {
+                val line = reader.readLine() ?: return@repeat
+                output += if (line.length > 2_000) line.take(2_000) + "…" else line
+            }
+        }
+        if (output.isEmpty()) "(empty file)" else output.joinToString("\n")
+    } catch (_: Exception) {
+        "File unreadable: ${path.name}"
+    }
+}
+
+private suspend fun executeLocalCommand(
+    ctx: Context,
+    input: String,
+    apps: List<AppEntry>,
+    currentPath: String,
+    history: List<String>,
+    onMemoryCleanup: () -> Unit,
+): CommandResult {
+    val command = input.trim().removePrefix("/").trim()
+    val name = command.substringBefore(' ').lowercase(Locale.ROOT)
+    val argument = command.substringAfter(' ', "").trim()
+    return try {
+        when (name) {
+            "clear", "gc" -> {
+                if (argument.isNotEmpty()) CommandResult("Usage: /$name", false)
+                else {
+                    onMemoryCleanup()
+                    CommandResult("App GC requested; system caches are Android-managed.")
+                }
+            }
+            "time" -> if (argument.isNotEmpty()) CommandResult("Usage: /time", false)
+                else CommandResult(SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()))
+            "help" -> if (argument.isNotEmpty()) CommandResult("Usage: /help", false) else CommandResult(COMMAND_HELP)
+            "sysinfo" -> if (argument.isNotEmpty()) CommandResult("Usage: /sysinfo", false) else CommandResult(deviceInfo(ctx))
+            "pkg" -> {
+                val app = findAppMatch(apps, argument)
+                when {
+                    argument.isBlank() -> CommandResult("Usage: /pkg <app name or package>", false)
+                    app == null -> CommandResult("No matching launcher app found.", false)
+                    openAppInfo(ctx, app.packageName) -> CommandResult("Opening App Info: ${app.label} (${app.packageName})")
+                    else -> CommandResult("Couldn't open App Info for ${app.packageName}.", false)
+                }
+            }
+            "clip" -> CommandResult(clipboardCommand(ctx, argument), success = argument.isBlank() || argument.equals("clear", true))
+            "dnd" -> CommandResult(
+                dndCommand(ctx, argument),
+                success = argument.isBlank() && runCatching {
+                    (ctx.getSystemService(NotificationManager::class.java))?.isNotificationPolicyAccessGranted == true
+                }.getOrDefault(false),
+            )
+            "ls" -> {
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val directory = resolveExplorerPath(currentPath, argument)
+                        CommandResult(listDirectory(directory), success = directory.isDirectory && directory.canRead())
+                    }.getOrElse { CommandResult(it.message ?: "Directory unreadable", false) }
+                }
+            }
+            "cd" -> {
+                if (argument.isBlank()) CommandResult("Usage: /cd <directory>", false)
+                else withContext(Dispatchers.IO) {
+                    runCatching {
+                        if (argument == ".." && File(currentPath).canonicalFile == fileRoot()) {
+                            return@runCatching CommandResult("Already at shared storage root: ${fileRoot().path}", newPath = fileRoot().path)
+                        }
+                        val directory = resolveExplorerPath(currentPath, argument)
+                        if (!directory.exists() || !directory.isDirectory) CommandResult("Directory not found: ${directory.path}", false)
+                        else if (!directory.canRead()) CommandResult("Directory unreadable: ${directory.path}", false)
+                        else CommandResult("Current directory: ${directory.path}", newPath = directory.path)
+                    }.getOrElse { CommandResult(it.message ?: "Directory not found", false) }
+                }
+            }
+            "cat" -> {
+                if (argument.isBlank()) CommandResult("Usage: /cat <filename>", false)
+                else withContext(Dispatchers.IO) {
+                    runCatching {
+                        val file = resolveExplorerPath(currentPath, argument)
+                        val output = readTextPreview(file)
+                        CommandResult(output, success = file.isFile && file.canRead() && file.length() <= MAX_TEXT_FILE_BYTES)
+                    }.getOrElse { CommandResult(it.message ?: "File unreadable", false) }
+                }
+            }
+            "history" -> when {
+                argument.equals("clear", ignoreCase = true) -> CommandResult("Command history cleared.", clearHistory = true)
+                argument.isNotEmpty() -> CommandResult("Usage: /history [clear]", false)
+                history.isEmpty() -> CommandResult("No command history yet.")
+                else -> CommandResult(history.mapIndexed { index, item -> "${index + 1}. $item" }.joinToString("\n"))
+            }
+            "layout" -> when (argument.lowercase(Locale.ROOT)) {
+                "grid" -> CommandResult("App drawer layout set to grid.", newGridLayout = true)
+                "list" -> CommandResult("App drawer layout set to list.", newGridLayout = false)
+                else -> CommandResult("Usage: /layout grid|list", false)
+            }
+            else -> CommandResult("Unknown command. Type /help", false)
+        }
+    } catch (_: SecurityException) {
+        CommandResult("Permission denied. Check Android settings and try again.", false)
+    } catch (_: Exception) {
+        CommandResult("Command failed because an Android system service was unavailable.", false)
+    }
 }
 
 // ───────────────────────────── Telemetry ─────────────────────────────
@@ -238,7 +517,12 @@ private data class Stats(
     val txBytesPerSec: Long? = null,
 )
 
-private fun readStats(ctx: Context, previous: Stats?, refreshDisk: Boolean): Stats {
+private fun readStats(
+    ctx: Context,
+    previous: Stats?,
+    refreshDisk: Boolean,
+    refreshSlowMetrics: Boolean,
+): Stats {
     // RAM
     val am = ctx.getSystemService(ActivityManager::class.java)
     val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
@@ -263,25 +547,30 @@ private fun readStats(ctx: Context, previous: Stats?, refreshDisk: Boolean): Sta
     // CPU "state": /proc/stat is blocked for apps on Android 8+, so we report
     // core count and load average (best effort).
     val cores = Runtime.getRuntime().availableProcessors()
-    val load = runCatching {
+    val load = if (!refreshSlowMetrics && previous != null) previous.load else runCatching {
         File("/proc/loadavg").readText().substringBefore(' ').toFloat()
     }.getOrNull()
 
     // Battery (sticky broadcast: passing a null receiver means nothing to register/leak)
-    val bi = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-    val level = bi?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-    val scale = bi?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
-    val batPct = if (level >= 0 && scale > 0) level * 100 / scale else 0
-    val status = bi?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-    val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-        status == BatteryManager.BATTERY_STATUS_FULL
+    val batteryStats = if (!refreshSlowMetrics && previous != null) {
+        previous.batPct to previous.charging
+    } else {
+        val bi = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = bi?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = bi?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+        val batPct = if (level >= 0 && scale > 0) level * 100 / scale else 0
+        val status = bi?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+        batPct to charging
+    }
     val rxBytes = TrafficStats.getTotalRxBytes()
     val txBytes = TrafficStats.getTotalTxBytes()
 
     return Stats(
         usedMb, totalMb, ramPct,
         diskStats.first, diskStats.second, diskStats.third,
-        cores, load, batPct, charging,
+        cores, load, batteryStats.first, batteryStats.second,
         rxBytes, txBytes, SystemClock.elapsedRealtime(),
     )
 }
@@ -327,27 +616,35 @@ private fun loadColor(pct: Int) = when {
 }
 
 @Composable
-private fun TelemetryBanner(lifecycleOwner: LifecycleOwner) {
+private fun TelemetryBanner(
+    lifecycleOwner: LifecycleOwner,
+    refreshSignal: Int,
+    onMemoryCleanup: () -> Unit,
+) {
     val ctx = LocalContext.current.applicationContext
     var stats by remember { mutableStateOf<Stats?>(null) }
     var expanded by rememberSaveable { mutableStateOf(false) }
+    var cleanupFeedback by remember { mutableStateOf(false) }
 
     // Do not sample system telemetry while the compact panel is closed. When
-    // open, sample only while the launcher is visible and at a modest interval.
-    LaunchedEffect(lifecycleOwner, expanded) {
+    // open, sample only while the launcher is visible and at a battery-conscious interval.
+    LaunchedEffect(lifecycleOwner, expanded, refreshSignal) {
         if (expanded) lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var previousSample: Stats? = null
             var lastDiskRefreshMs = 0L
+            var lastSlowRefreshMs = 0L
             while (true) {
                 val now = SystemClock.elapsedRealtime()
-                val refreshDisk = previousSample == null || now - lastDiskRefreshMs >= 30_000L
+                val refreshDisk = previousSample == null || now - lastDiskRefreshMs >= 3_000L
+                val refreshSlowMetrics = previousSample == null || now - lastSlowRefreshMs >= 3_000L
                 val sample = withContext(Dispatchers.IO) {
-                    readStats(ctx, previousSample, refreshDisk)
+                    readStats(ctx, previousSample, refreshDisk, refreshSlowMetrics)
                 }
                 stats = withNetworkRates(sample, previousSample)
                 previousSample = sample
                 if (refreshDisk) lastDiskRefreshMs = sample.sampledAtMs
-                delay(1_000)
+                if (refreshSlowMetrics) lastSlowRefreshMs = sample.sampledAtMs
+                delay(3_000)
             }
         }
     }
@@ -409,7 +706,21 @@ private fun TelemetryBanner(lifecycleOwner: LifecycleOwner) {
             BasicText(
                 "RAM [${bar(s.ramPct)}] ${s.usedMb}/${s.totalMb}MB ${s.ramPct}%",
                 style = Mono.copy(color = loadColor(s.ramPct)),
+                modifier = Modifier.clickable {
+                    cleanupFeedback = true
+                    onMemoryCleanup()
+                },
             )
+            if (cleanupFeedback) {
+                BasicText(
+                    "GC requested • refreshing app stats",
+                    style = Mono.copy(color = DIM, fontSize = 10.sp),
+                )
+                LaunchedEffect(cleanupFeedback) {
+                    delay(2_000)
+                    cleanupFeedback = false
+                }
+            }
             BasicText(
                 "DISK [${bar(s.diskPct)}] ${formatStorage(s.diskTotalMb - s.diskUsedMb)} free / ${formatStorage(s.diskTotalMb)}",
                 style = Mono.copy(color = loadColor(s.diskPct)),
@@ -441,11 +752,32 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
     val prompt = remember(ctx) { readPromptIdentity(ctx) }
     var wallpaper by remember(ctx) { mutableStateOf<ImageBitmap?>(null) }
+    var statsRefreshSignal by remember { mutableIntStateOf(0) }
 
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var reloadTick by remember { mutableIntStateOf(0) }
     var query by remember { mutableStateOf("") }
+    var commandOutput by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
+    val gridState = rememberLazyGridState()
+    val preferences = remember(ctx) { ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
+    var currentPath by rememberSaveable { mutableStateOf(Environment.getExternalStorageDirectory().absolutePath) }
+    var commandHistory by remember(ctx) {
+        mutableStateOf<List<String>>(
+            preferences.getString(PREF_COMMAND_HISTORY, "").orEmpty()
+                .split('\n').filter { it.isNotBlank() }.takeLast(MAX_COMMAND_HISTORY),
+        )
+    }
+    var isGridLayout by remember(ctx) { mutableStateOf(preferences.getBoolean(PREF_GRID_LAYOUT, false)) }
+
+    val onMemoryCleanup: () -> Unit = {
+        coroutineScope.launch {
+            // Request collection for this app's managed heap only. Android owns
+            // process and system caches; this does not clear device-wide memory.
+            withContext(Dispatchers.Default) { Runtime.getRuntime().gc() }
+            statsRefreshSignal++
+        }
+    }
 
     // (Re)load the app list off the main thread. Restarting cancels any stale load.
     LaunchedEffect(reloadTick) {
@@ -479,6 +811,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
             query = ""
             focus.clearFocus()
             listState.scrollToItem(0)
+            gridState.scrollToItem(0)
         }
     }
 
@@ -488,9 +821,14 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
         focus.clearFocus()
     }
 
-    val filtered = remember(apps, query) {
+    val commandMode = query.trimStart().startsWith("/")
+    val filtered = remember(apps, query, commandMode) {
         val q = query.trim().lowercase(Locale.ROOT)
-        if (q.isEmpty()) apps else apps.filter { it.searchLabel.contains(q) }
+        when {
+            commandMode -> emptyList()
+            q.isEmpty() -> apps
+            else -> apps.filter { it.searchLabel.contains(q) }
+        }
     }
     val appSections = remember(filtered) {
         filtered.groupBy { app -> app.label.firstOrNull()?.uppercaseChar()?.takeIf { it in 'A'..'Z' } ?: '#' }
@@ -506,9 +844,10 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
             }
         }
     }
-    val currentLetter by remember(filtered, listState) {
+    val currentLetter by remember(filtered, listState, gridState, isGridLayout) {
         derivedStateOf {
-            sectionStarts.lastOrNull { it.second <= listState.firstVisibleItemIndex }?.first
+            val visibleIndex = if (isGridLayout) gridState.firstVisibleItemIndex else listState.firstVisibleItemIndex
+            sectionStarts.lastOrNull { it.second <= visibleIndex }?.first
                 ?: sectionStarts.firstOrNull()?.first ?: '#'
         }
     }
@@ -532,7 +871,11 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
             .padding(horizontal = 12.dp)
     ) {
         Spacer(Modifier.height(8.dp))
-        TelemetryBanner(lifecycleOwner)
+        TelemetryBanner(
+            lifecycleOwner = lifecycleOwner,
+            refreshSignal = statsRefreshSignal,
+            onMemoryCleanup = onMemoryCleanup,
+        )
         Spacer(Modifier.height(16.dp))
 
         BasicText(
@@ -547,54 +890,127 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
 
         SearchField(
             query = query,
-            onQueryChange = { query = it },
-            onSearch = { filtered.firstOrNull()?.let { launchApp(ctx, it) } },
-        )
-        Spacer(Modifier.height(10.dp))
-        BasicText(
-            "// ${filtered.size} APPLICATIONS",
-            style = Mono.copy(color = DIM, fontSize = 10.sp),
-            modifier = Modifier.padding(bottom = 4.dp),
-        )
-
-        Row(Modifier.weight(1f).fillMaxWidth()) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).fillMaxHeight(),
-            ) {
-                appSections.forEach { (letter, sectionApps) ->
-                    stickyHeader(key = "section-$letter") {
-                        BasicText(
-                            text = "── $letter ──",
-                            style = Mono.copy(color = CYAN, fontSize = 10.sp),
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+            onQueryChange = {
+                query = it
+                commandOutput = null
+            },
+            onSearch = {
+                if (commandMode) {
+                    val entered = query.trim()
+                    coroutineScope.launch {
+                        val result = executeLocalCommand(
+                            ctx = ctx,
+                            input = entered,
+                            apps = apps,
+                            currentPath = currentPath,
+                            history = commandHistory,
+                            onMemoryCleanup = onMemoryCleanup,
                         )
+                        result.newPath?.let { currentPath = it }
+                        result.newGridLayout?.let { grid ->
+                            isGridLayout = grid
+                            preferences.edit().putBoolean(PREF_GRID_LAYOUT, grid).apply()
+                        }
+                        if (result.clearHistory) {
+                            commandHistory = emptyList()
+                            preferences.edit().remove(PREF_COMMAND_HISTORY).apply()
+                        } else if (result.success) {
+                            commandHistory = (commandHistory + entered).takeLast(MAX_COMMAND_HISTORY)
+                            preferences.edit().putString(PREF_COMMAND_HISTORY, commandHistory.joinToString("\n")).apply()
+                        }
+                        commandOutput = result.output
                     }
-                    items(
-                        items = sectionApps,
-                        key = { it.key },
-                        contentType = { "app-row" },
-                    ) { app ->
-                        AppRow(
-                            app = app,
-                            onClick = { launchApp(ctx, app) },
-                            onLongClick = {
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                openAppInfo(ctx, app.packageName)
-                            },
-                        )
+                } else {
+                    filtered.firstOrNull()?.let { launchApp(ctx, it) }
+                }
+            },
+        )
+        if (commandMode) {
+            commandOutput?.let { output ->
+                TerminalOutput(output)
+            }
+        } else {
+            Spacer(Modifier.height(10.dp))
+            BasicText(
+                "// ${filtered.size} APPLICATIONS",
+                style = Mono.copy(color = DIM, fontSize = 10.sp),
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                if (isGridLayout) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(3),
+                        state = gridState,
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                    ) {
+                        appSections.forEach { (letter, sectionApps) ->
+                            item(key = "section-$letter", span = { GridItemSpan(maxLineSpan) }) {
+                                BasicText(
+                                    text = "── $letter ──",
+                                    style = Mono.copy(color = CYAN, fontSize = 10.sp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                                )
+                            }
+                            gridItems(
+                                items = sectionApps,
+                                key = { it.key },
+                                span = { GridItemSpan(1) },
+                                contentType = { "app-grid-cell" },
+                            ) { app ->
+                                AppGridCell(
+                                    app = app,
+                                    onClick = { launchApp(ctx, app) },
+                                    onLongClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        openAppInfo(ctx, app.packageName)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                    ) {
+                        appSections.forEach { (letter, sectionApps) ->
+                            stickyHeader(key = "section-$letter") {
+                                BasicText(
+                                    text = "── $letter ──",
+                                    style = Mono.copy(color = CYAN, fontSize = 10.sp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                                )
+                            }
+                            items(
+                                items = sectionApps,
+                                key = { it.key },
+                                contentType = { "app-row" },
+                            ) { app ->
+                                AppRow(
+                                    app = app,
+                                    onClick = { launchApp(ctx, app) },
+                                    onLongClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        openAppInfo(ctx, app.packageName)
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
-            }
             AlphabetIndex(
                 letters = ALPHABET,
                 availableLetters = availableLetters,
                 selectedLetter = currentLetter,
                 onSelect = { letter ->
                     val target = sectionStarts.firstOrNull { it.first == letter }?.second ?: -1
-                    if (target >= 0) coroutineScope.launch { listState.scrollToItem(target) }
+                    if (target >= 0) coroutineScope.launch {
+                        if (isGridLayout) gridState.scrollToItem(target) else listState.scrollToItem(target)
+                    }
                 },
             )
+            }
         }
         }
     }
@@ -612,7 +1028,8 @@ private fun AlphabetIndex(
     Column(
         modifier = Modifier
             .fillMaxHeight()
-            .width(22.dp)
+            .width(28.dp)
+            .offset(x = 6.dp)
             .pointerInput(letters) {
                 fun selectAt(y: Float) {
                     if (letters.isEmpty() || size.height == 0) return
@@ -656,13 +1073,46 @@ private fun AlphabetIndex(
                         letter in availableLetters -> DIM
                         else -> DIM.copy(alpha = 0.28f)
                     },
-                    fontSize = if (selected) 11.sp else 9.sp,
+                    fontSize = if (selected) 12.sp else 10.sp,
                     lineHeight = 14.sp,
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(18.dp),
             )
+        }
+    }
+}
+
+@Composable
+private fun TerminalOutput(output: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 8.dp)
+            .border(1.dp, BORDER)
+            .background(Color(0x66101318))
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        BasicText("┌─ LOCAL COMMAND ─", style = Mono.copy(color = DIM, fontSize = 10.sp))
+        BasicText(terminalAnnotatedText(output), style = Mono.copy(color = CYAN, fontSize = 11.sp))
+    }
+}
+
+private fun terminalAnnotatedText(output: String) = buildAnnotatedString {
+    var index = 0
+    while (index < output.length) {
+        val command = HELP_COMMAND_TOKENS.firstOrNull { token ->
+            output.startsWith(token, index) &&
+                (index + token.length == output.length ||
+                    !output[index + token.length].isLetterOrDigit() && output[index + token.length] != '_')
+        }
+        if (command == null) {
+            append(output[index])
+            index++
+        } else {
+            withStyle(SpanStyle(color = GREEN, fontWeight = FontWeight.Bold)) { append(command) }
+            index += command.length
         }
     }
 }
@@ -717,6 +1167,31 @@ private fun AppRow(
             text = app.label,
             maxLines = 1,
             style = TextStyle(color = TEXT, fontSize = 16.sp),
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun AppGridCell(
+    app: AppEntry,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(68.dp)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 5.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        BasicText("›", style = Mono.copy(color = GREEN, fontSize = 14.sp))
+        BasicText(
+            text = app.label,
+            maxLines = 1,
+            style = TextStyle(color = TEXT, fontSize = 12.sp),
         )
     }
 }
