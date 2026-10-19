@@ -1,4 +1,4 @@
-package com.example.minilauncher
+package com.llewtonsi.vixlauncher
 
 import android.app.ActivityManager
 import android.app.NotificationManager
@@ -23,6 +23,7 @@ import android.os.UserManager
 import android.provider.Settings
 import android.hardware.display.DisplayManager
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Display
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -107,6 +108,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -162,7 +164,17 @@ private val COMMAND_HELP = """AVAILABLE COMMANDS
 /clear
   Clear the terminal output.
 /free
-  Request garbage collection for VixLauncher's app memory and refresh its RAM stats.
+  Show VixLauncher's managed heap usage. Android manages garbage collection automatically.
+/apps [query]
+  List up to 100 launchable apps, optionally filtered by label or package name.
+/refresh
+  Refresh the cached launcher app list from Android.
+/battery
+  Show the current battery level, charging state, temperature, and voltage.
+/uptime
+  Show how long the device has been running since its last boot.
+/version
+  Show VixLauncher and Android version information.
 /time
   Show the current local time.
 /sysinfo
@@ -177,8 +189,8 @@ private val COMMAND_HELP = """AVAILABLE COMMANDS
   List files and folders in the current directory or a relative subfolder.
 /pwd
   Print the current directory.
-/mkdir <directory> | /rmdir <directory> | /rm <file>
-  Create or remove items in shared storage.
+/mkdir <directory> | /rmdir --confirm <directory> | /rm --confirm <file>
+  Create or remove items in shared storage. Deletion requires --confirm.
 /find <query>
   Find matching folders under the current directory.
 /grep <pattern> <file>
@@ -200,10 +212,11 @@ private val COMMAND_HELP = """AVAILABLE COMMANDS
 /help
   Show this command list.
 
-GC requests affect only VixLauncher's app memory. Android manages system RAM and caches."""
+Android manages app garbage collection and system memory automatically."""
 
 private val HELP_COMMAND_TOKENS = listOf(
-    "/clear", "/free", "/time", "/sysinfo", "/pkg", "/clip", "/dnd",
+    "/clear", "/free", "/apps", "/refresh", "/battery", "/uptime", "/version",
+    "/time", "/sysinfo", "/pkg", "/clip", "/dnd",
     "/ls", "/pwd", "/mkdir", "/rmdir", "/rm", "/find", "/grep", "/calc", "/ps", "/kill", "/open", "/uninstall", "/cd", "/cat", "/history", "/layout", "/help",
 )
 
@@ -211,7 +224,11 @@ private const val PREFS_NAME = "vixlauncher_preferences"
 private const val PREF_COMMAND_HISTORY = "command_history"
 private const val PREF_GRID_LAYOUT = "grid_layout"
 private const val MAX_COMMAND_HISTORY = 20
+private const val MAX_TERMINAL_OUTPUT_ENTRIES = 20
+private const val MAX_TERMINAL_OUTPUT_CHARS = 8_000
+private const val MAX_COMMAND_INPUT_CHARS = 512
 private const val MAX_LISTING_ENTRIES = 200
+private const val MAX_FIND_ENTRIES = 5_000
 private const val MAX_TEXT_FILE_BYTES = 1024L * 1024L
 private const val TELEMETRY_REFRESH_MS = 5_000L
 private const val CPU_REFRESH_MS = 15_000L
@@ -225,6 +242,7 @@ private data class CommandResult(
     val clearHistory: Boolean = false,
     val newGridLayout: Boolean? = null,
     val clearOutput: Boolean = false,
+    val refreshApps: Boolean = false,
 )
 
 private val Mono = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp)
@@ -352,6 +370,48 @@ DISPLAY $resolution @ $refreshRate
 KERNEL  ${System.getProperty("os.version", "unknown")}"""
 }
 
+private fun batteryInfo(ctx: Context): String {
+    val intent = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        ?: return "Battery information is unavailable."
+    val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+    val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+    val percent = if (level >= 0 && scale > 0) "${level * 100 / scale}%" else "unknown"
+    val status = when (intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)) {
+        BatteryManager.BATTERY_STATUS_CHARGING -> "charging"
+        BatteryManager.BATTERY_STATUS_DISCHARGING -> "discharging"
+        BatteryManager.BATTERY_STATUS_FULL -> "full"
+        BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "not charging"
+        else -> "unknown"
+    }
+    val temperatureTenthsC = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
+    val temperature = if (temperatureTenthsC >= 0) "${temperatureTenthsC / 10.0}°C" else "unknown"
+    val voltageMv = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
+    val voltage = if (voltageMv > 0) "$voltageMv mV" else "unknown"
+    return "BATTERY $percent • $status\nTEMP $temperature\nVOLTAGE $voltage"
+}
+
+private fun deviceUptime(): String {
+    var seconds = SystemClock.elapsedRealtime() / 1_000
+    val days = seconds / 86_400
+    seconds %= 86_400
+    val hours = seconds / 3_600
+    seconds %= 3_600
+    val minutes = seconds / 60
+    seconds %= 60
+    return buildList {
+        if (days > 0) add("${days}d")
+        if (hours > 0 || days > 0) add("${hours}h")
+        add("${minutes}m")
+        add("${seconds}s")
+    }.joinToString(" ")
+}
+
+private fun appVersion(ctx: Context): String {
+    @Suppress("DEPRECATION")
+    val versionName = ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "unknown"
+    return "VixLauncher $versionName\nAndroid ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
+}
+
 private fun clipboardCommand(ctx: Context, argument: String): String {
     val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     if (argument.equals("clear", ignoreCase = true)) {
@@ -442,8 +502,9 @@ private fun readTextPreview(path: File): String {
     }
 }
 
-private class ArithmeticParser(private val source: String) {
+internal class ArithmeticParser(private val source: String) {
     private var i = 0
+    private var nesting = 0
     fun parse(): Double {
         val value = expression()
         spaces()
@@ -467,13 +528,27 @@ private class ArithmeticParser(private val source: String) {
         }
     }
     private fun unary(): Double {
-        if (eat('+')) return unary()
-        if (eat('-')) return -unary()
-        if (eat('(')) { val n = expression(); require(eat(')')) { "Missing )." }; return n }
+        if (eat('+')) return nested { unary() }
+        if (eat('-')) return nested { -unary() }
+        if (eat('(')) return nested {
+            val n = expression()
+            require(eat(')')) { "Missing )." }
+            n
+        }
         spaces(); val start = i
         while (i < source.length && (source[i].isDigit() || source[i] == '.')) i++
         require(i > start) { "Expected a number." }
         return source.substring(start, i).toDoubleOrNull() ?: error("Invalid number.")
+    }
+
+    private fun nested(block: () -> Double): Double {
+        nesting++
+        return try {
+            require(nesting <= 64) { "Expression is nested too deeply." }
+            block()
+        } finally {
+            nesting--
+        }
     }
 }
 
@@ -483,8 +558,10 @@ private suspend fun executeLocalCommand(
     apps: List<AppEntry>,
     currentPath: String,
     history: List<String>,
-    onMemoryCleanup: () -> Unit,
 ): CommandResult {
+    if (input.length > MAX_COMMAND_INPUT_CHARS) {
+        return CommandResult("Command is too long (maximum $MAX_COMMAND_INPUT_CHARS characters).", false)
+    }
     val command = input.trim().removePrefix("/").trim()
     val name = command.substringBefore(' ').lowercase(Locale.ROOT)
     val argument = command.substringAfter(' ', "").trim()
@@ -495,10 +572,33 @@ private suspend fun executeLocalCommand(
             "free" -> {
                 if (argument.isNotEmpty()) CommandResult("Usage: /$name", false)
                 else {
-                    onMemoryCleanup()
-                    CommandResult("App GC requested; system caches are Android-managed.")
+                    val runtime = Runtime.getRuntime()
+                    val usedMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
+                    val maxMb = runtime.maxMemory() / (1024 * 1024)
+                    CommandResult("VixLauncher heap: ${usedMb} MiB used / ${maxMb} MiB max. Android manages garbage collection automatically.")
                 }
             }
+            "apps" -> {
+                val normalized = argument.lowercase(Locale.ROOT)
+                val matches = apps.asSequence()
+                    .filter { normalized.isBlank() || it.searchLabel.contains(normalized) || it.packageName.contains(normalized, ignoreCase = true) }
+                    .take(101)
+                    .toList()
+                if (matches.isEmpty()) CommandResult("No matching launcher apps.", false)
+                else {
+                    val shown = matches.take(100).joinToString("\n") { "${it.label} (${it.packageName})" }
+                    val suffix = if (matches.size > 100) "\n… more matches omitted" else ""
+                    CommandResult("${matches.size.coerceAtMost(100)} app(s) shown:\n$shown$suffix")
+                }
+            }
+            "refresh" -> if (argument.isNotEmpty()) CommandResult("Usage: /refresh", false)
+                else CommandResult("Refreshing launchable apps from Android.", refreshApps = true)
+            "battery" -> if (argument.isNotEmpty()) CommandResult("Usage: /battery", false)
+                else CommandResult(batteryInfo(ctx))
+            "uptime" -> if (argument.isNotEmpty()) CommandResult("Usage: /uptime", false)
+                else CommandResult("Device uptime: ${deviceUptime()}")
+            "version" -> if (argument.isNotEmpty()) CommandResult("Usage: /version", false)
+                else CommandResult(appVersion(ctx))
             "time" -> if (argument.isNotEmpty()) CommandResult("Usage: /time", false)
                 else CommandResult(SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()))
             "help" -> if (argument.isNotEmpty()) CommandResult("Usage: /help", false) else CommandResult(COMMAND_HELP)
@@ -530,9 +630,15 @@ private suspend fun executeLocalCommand(
             "pwd" -> if (argument.isNotEmpty()) CommandResult("Usage: /pwd", false) else CommandResult(currentPath)
             "mkdir", "rmdir", "rm" -> {
                 if (argument.isBlank()) CommandResult("Usage: /$name <path>", false)
+                else if (name != "mkdir" && !argument.startsWith("--confirm ")) {
+                    CommandResult("Deletion changes shared storage. Repeat as /$name --confirm <path> to continue.", false)
+                }
                 else withContext(Dispatchers.IO) {
                     runCatching {
-                        val target = resolveExplorerPath(currentPath, argument)
+                        val requestedPath = if (name == "mkdir") argument else argument.removePrefix("--confirm ").trim()
+                        require(requestedPath.isNotBlank()) { "Usage: /$name --confirm <path>" }
+                        val target = resolveExplorerPath(currentPath, requestedPath)
+                        require(target != fileRoot()) { "The shared storage root cannot be removed." }
                         when (name) {
                             "mkdir" -> if (target.exists()) CommandResult("Already exists: ${target.path}", false)
                                 else if (target.mkdirs()) CommandResult("Created directory: ${target.path}") else CommandResult("Could not create directory.", false)
@@ -549,8 +655,15 @@ private suspend fun executeLocalCommand(
                 else withContext(Dispatchers.IO) {
                     runCatching {
                         val base = resolveExplorerPath(currentPath, "")
-                        val matches = base.walkTopDown().maxDepth(12).filter { it.isDirectory && it.name.contains(argument, true) }.take(100).map { it.path }.toList()
-                        CommandResult(if (matches.isEmpty()) "No matching folders." else matches.joinToString("\n"))
+                        val visited = base.walkTopDown().maxDepth(12).take(MAX_FIND_ENTRIES + 1).toList()
+                        val matches = visited.asSequence()
+                            .filter { it.isDirectory && it.name.contains(argument, true) }
+                            .take(100)
+                            .map { it.path }
+                            .toList()
+                        val output = (if (matches.isEmpty()) "No matching folders." else matches.joinToString("\n")) +
+                            if (visited.size > MAX_FIND_ENTRIES) "\nSearch stopped after $MAX_FIND_ENTRIES entries." else ""
+                        CommandResult(output)
                     }.getOrElse { CommandResult(it.message ?: "Search failed.", false) }
                 }
             }
@@ -635,9 +748,13 @@ private suspend fun executeLocalCommand(
             }
             else -> CommandResult("Unknown command. Type /help", false)
         }
-    } catch (_: SecurityException) {
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (exception: SecurityException) {
+        Log.w("VixLauncher", "Command denied by Android (${exception.javaClass.simpleName})")
         CommandResult("Permission denied. Check Android settings and try again.", false)
-    } catch (_: Exception) {
+    } catch (exception: Exception) {
+        Log.e("VixLauncher", "Local command failed (${exception.javaClass.simpleName})")
         CommandResult("Command failed because an Android system service was unavailable.", false)
     }
 }
@@ -765,12 +882,12 @@ private fun loadColor(pct: Int) = when {
 private fun TelemetryBanner(
     lifecycleOwner: LifecycleOwner,
     refreshSignal: Int,
-    onMemoryCleanup: () -> Unit,
+    onRefreshStats: () -> Unit,
 ) {
     val ctx = LocalContext.current.applicationContext
     var stats by remember { mutableStateOf<Stats?>(null) }
     var expanded by rememberSaveable { mutableStateOf(false) }
-    var cleanupFeedback by remember { mutableStateOf(false) }
+    var refreshFeedback by remember { mutableStateOf(false) }
 
     // Do not sample system telemetry while the compact panel is closed. When
     // open, sample only while the launcher is visible. Fast readings use a modest
@@ -857,18 +974,18 @@ private fun TelemetryBanner(
                 "RAM [${bar(s.ramPct)}] ${s.usedMb}/${s.totalMb}MB ${s.ramPct}%",
                 style = Mono.copy(color = loadColor(s.ramPct)),
                 modifier = Modifier.clickable {
-                    cleanupFeedback = true
-                    onMemoryCleanup()
+                    refreshFeedback = true
+                    onRefreshStats()
                 },
             )
-            if (cleanupFeedback) {
+            if (refreshFeedback) {
                 BasicText(
-                    "GC requested • refreshing app stats",
+                    "Stats refreshed • Android manages app memory",
                     style = Mono.copy(color = DIM, fontSize = 10.sp),
                 )
-                LaunchedEffect(cleanupFeedback) {
+                LaunchedEffect(refreshFeedback) {
                     delay(2_000)
-                    cleanupFeedback = false
+                    refreshFeedback = false
                 }
             }
             BasicText(
@@ -920,14 +1037,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     }
     var isGridLayout by remember(ctx) { mutableStateOf(preferences.getBoolean(PREF_GRID_LAYOUT, false)) }
 
-    val onMemoryCleanup: () -> Unit = {
-        coroutineScope.launch {
-            // Request collection for this app's managed heap only. Android owns
-            // process and system caches; this does not clear device-wide memory.
-            withContext(Dispatchers.Default) { Runtime.getRuntime().gc() }
-            statsRefreshSignal++
-        }
-    }
+    val onRefreshStats: () -> Unit = { statsRefreshSignal++ }
 
     // (Re)load the app list off the main thread. Restarting cancels any stale load.
     LaunchedEffect(reloadTick) {
@@ -949,6 +1059,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)
             addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addAction(Intent.ACTION_PACKAGE_CHANGED)
             addDataScheme("package")
         }
         ContextCompat.registerReceiver(ctx, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -1024,7 +1135,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
         TelemetryBanner(
             lifecycleOwner = lifecycleOwner,
             refreshSignal = statsRefreshSignal,
-            onMemoryCleanup = onMemoryCleanup,
+            onRefreshStats = onRefreshStats,
         )
         Spacer(Modifier.height(16.dp))
 
@@ -1054,8 +1165,8 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                             apps = apps,
                             currentPath = currentPath,
                             history = commandHistory,
-                            onMemoryCleanup = onMemoryCleanup,
                         )
+                        if (result.refreshApps) reloadTick++
                         result.newPath?.let { currentPath = it }
                         result.newGridLayout?.let { grid ->
                             isGridLayout = grid
@@ -1071,7 +1182,11 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                         if (query.trim() == entered) {
                             query = "/"
                             commandOutput = if (result.clearOutput) emptyList() else {
-                                listOf(entered to result.output.ifBlank { "(no output)" }) + commandOutput
+                                val output = if (result.output.length > MAX_TERMINAL_OUTPUT_CHARS) {
+                                    result.output.take(MAX_TERMINAL_OUTPUT_CHARS) + "\n… output truncated"
+                                } else result.output
+                                (listOf(entered.take(MAX_COMMAND_INPUT_CHARS) to output.ifBlank { "(no output)" }) + commandOutput)
+                                    .take(MAX_TERMINAL_OUTPUT_ENTRIES)
                             }
                         }
                     }
