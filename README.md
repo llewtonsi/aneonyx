@@ -40,7 +40,7 @@ Open the panel's **INFO** section to view device readouts:
 * ⚙️ CPU load average and available core count
 * 🌐 Device-wide network receive and transmit rates
 
-The panel stays idle while collapsed and samples while expanded and visible. All system readings refresh every three seconds while the panel is expanded and visible. Network rates are based on device-wide traffic counters. The CPU bar is a normalized load-average estimate, not a direct CPU utilization reading.
+The panel stays idle while collapsed and samples only while the launcher is visible. RAM and network readings refresh every five seconds, CPU load every 15 seconds, and battery and disk readings every 30 seconds. Network rates are based on device-wide traffic counters. The CPU bar is a normalized load-average estimate, not a direct CPU utilization reading.
 
 Terminal commands run only when you press the keyboard's **Search** action. `/help` describes each command. Garbage collection requests apply to VixLauncher's managed app memory; Android continues to manage system RAM and caches. `/dnd` requires notification-policy access in Android Settings; use Android Quick Settings when you need a timed DND session.
 

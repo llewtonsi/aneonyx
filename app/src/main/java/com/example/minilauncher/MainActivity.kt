@@ -195,6 +195,10 @@ private const val PREF_GRID_LAYOUT = "grid_layout"
 private const val MAX_COMMAND_HISTORY = 20
 private const val MAX_LISTING_ENTRIES = 200
 private const val MAX_TEXT_FILE_BYTES = 1024L * 1024L
+private const val TELEMETRY_REFRESH_MS = 5_000L
+private const val CPU_REFRESH_MS = 15_000L
+private const val BATTERY_REFRESH_MS = 30_000L
+private const val DISK_REFRESH_MS = 30_000L
 
 private data class CommandResult(
     val output: String,
@@ -535,7 +539,8 @@ private fun readStats(
     ctx: Context,
     previous: Stats?,
     refreshDisk: Boolean,
-    refreshSlowMetrics: Boolean,
+    refreshCpuMetrics: Boolean,
+    refreshBatteryMetrics: Boolean,
 ): Stats {
     // RAM
     val am = ctx.getSystemService(ActivityManager::class.java)
@@ -561,12 +566,12 @@ private fun readStats(
     // CPU "state": /proc/stat is blocked for apps on Android 8+, so we report
     // core count and load average (best effort).
     val cores = Runtime.getRuntime().availableProcessors()
-    val load = if (!refreshSlowMetrics && previous != null) previous.load else runCatching {
+    val load = if (!refreshCpuMetrics && previous != null) previous.load else runCatching {
         File("/proc/loadavg").readText().substringBefore(' ').toFloat()
     }.getOrNull()
 
     // Battery (sticky broadcast: passing a null receiver means nothing to register/leak)
-    val batteryStats = if (!refreshSlowMetrics && previous != null) {
+    val batteryStats = if (!refreshBatteryMetrics && previous != null) {
         previous.batPct to previous.charging
     } else {
         val bi = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -641,24 +646,28 @@ private fun TelemetryBanner(
     var cleanupFeedback by remember { mutableStateOf(false) }
 
     // Do not sample system telemetry while the compact panel is closed. When
-    // open, sample only while the launcher is visible and at a battery-conscious interval.
+    // open, sample only while the launcher is visible. Fast readings use a modest
+    // interval; disk, battery, and CPU load are sampled less often.
     LaunchedEffect(lifecycleOwner, expanded, refreshSignal) {
         if (expanded) lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var previousSample: Stats? = null
             var lastDiskRefreshMs = 0L
-            var lastSlowRefreshMs = 0L
+            var lastCpuRefreshMs = 0L
+            var lastBatteryRefreshMs = 0L
             while (true) {
                 val now = SystemClock.elapsedRealtime()
-                val refreshDisk = previousSample == null || now - lastDiskRefreshMs >= 3_000L
-                val refreshSlowMetrics = previousSample == null || now - lastSlowRefreshMs >= 3_000L
+                val refreshDisk = previousSample == null || now - lastDiskRefreshMs >= DISK_REFRESH_MS
+                val refreshCpuMetrics = previousSample == null || now - lastCpuRefreshMs >= CPU_REFRESH_MS
+                val refreshBatteryMetrics = previousSample == null || now - lastBatteryRefreshMs >= BATTERY_REFRESH_MS
                 val sample = withContext(Dispatchers.IO) {
-                    readStats(ctx, previousSample, refreshDisk, refreshSlowMetrics)
+                    readStats(ctx, previousSample, refreshDisk, refreshCpuMetrics, refreshBatteryMetrics)
                 }
                 stats = withNetworkRates(sample, previousSample)
                 previousSample = sample
                 if (refreshDisk) lastDiskRefreshMs = sample.sampledAtMs
-                if (refreshSlowMetrics) lastSlowRefreshMs = sample.sampledAtMs
-                delay(3_000)
+                if (refreshCpuMetrics) lastCpuRefreshMs = sample.sampledAtMs
+                if (refreshBatteryMetrics) lastBatteryRefreshMs = sample.sampledAtMs
+                delay(TELEMETRY_REFRESH_MS)
             }
         }
     }
