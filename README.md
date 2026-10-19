@@ -19,11 +19,12 @@ VixLauncher brings a shell-like prompt, a fast text-first app list, a collapsibl
 * A shell-style prompt that reads the available Android profile name and device name
 * Text-first app rows without app icons
 * Live app count and a search field for filtering installed apps
-* Local terminal commands from the search field: `/clear`, `/gc`, `/time`, `/sysinfo`, `/pkg`, `/clip`, `/dnd`, `/ls`, `/cd`, `/cat`, `/history`, `/layout`, and `/help`
-* A bounded file browser for storage locations Android makes available to the app: `/ls [subfolder]`, `/cd <directory>`, and `/cat <filename>` (first 20 lines; files over 1 MiB are declined)
+* Local terminal commands from the search field: `/clear`, `/free`, `/ps`, `/kill`, `/pwd`, `/mkdir`, `/rmdir`, `/rm`, `/find`, `/open`, `/uninstall`, `/grep`, `/calc`, `/time`, `/sysinfo`, `/pkg`, `/clip`, `/dnd`, `/ls`, `/cd`, `/cat`, `/history`, `/layout`, and `/help`
+* Terminal output shows the most recent command result; `/clear` clears it and `/free` requests garbage collection for VixLauncher's app process
+* A bounded file browser for storage locations Android makes available to the app: `/ls [subfolder]`, `/cd <directory>`, `/pwd`, `/mkdir <directory>`, `/rmdir <directory>`, `/rm <file>`, `/find <query>`, `/grep <pattern> <file>`, and `/cat <filename>` (text reads capped at 1 MiB)
 * The last 20 successful slash commands persist locally; `/history clear` deletes the saved history
 * `/layout grid` and `/layout list` switch between a three-column app grid and the compact list, with the choice saved across launches
-* Tap the RAM readout or run `/gc` to request garbage collection for VixLauncher's app process and refresh its telemetry
+* Tap the RAM readout or run `/free` to request garbage collection for VixLauncher's app process and refresh its telemetry
 * Apps grouped under sticky alphabetical headings, with a draggable A–Z rail that jumps to the nearest available section
 * Press the keyboard's **Search** action to open the first matching app
 * Long-press an app to open its Android app info page

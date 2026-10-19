@@ -52,6 +52,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -74,6 +75,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.animation.animateContentSize
@@ -157,7 +159,9 @@ private val DIM = Color(0xFF858B98)
 private val TEXT = Color(0xFFE0E0E0)
 private val ALPHABET = ('A'..'Z').toList() + '#'
 private val COMMAND_HELP = """AVAILABLE COMMANDS
-/clear, /gc
+/clear
+  Clear the terminal output.
+/free
   Request garbage collection for VixLauncher's app memory and refresh its RAM stats.
 /time
   Show the current local time.
@@ -171,6 +175,20 @@ private val COMMAND_HELP = """AVAILABLE COMMANDS
   Toggle Do Not Disturb. Use Android Quick Settings to set a timed session.
 /ls [subfolder]
   List files and folders in the current directory or a relative subfolder.
+/pwd
+  Print the current directory.
+/mkdir <directory> | /rmdir <directory> | /rm <file>
+  Create or remove items in shared storage.
+/find <query>
+  Find matching folders under the current directory.
+/grep <pattern> <file>
+  Print matching lines from a text file.
+/calc <expression>
+  Calculate arithmetic expressions with +, -, *, /, %, and parentheses.
+/ps | /kill <app>
+  Show visible app processes. Android does not let launchers force-stop other apps.
+/open <app> | /uninstall <app>
+  Launch an app or open Android's uninstall confirmation.
 /cd <directory>
   Change directory. Use /cd .. to move up one directory.
 /cat <filename>
@@ -185,8 +203,8 @@ private val COMMAND_HELP = """AVAILABLE COMMANDS
 GC requests affect only VixLauncher's app memory. Android manages system RAM and caches."""
 
 private val HELP_COMMAND_TOKENS = listOf(
-    "/clear", "/gc", "/time", "/sysinfo", "/pkg", "/clip", "/dnd",
-    "/ls", "/cd", "/cat", "/history", "/layout", "/help",
+    "/clear", "/free", "/time", "/sysinfo", "/pkg", "/clip", "/dnd",
+    "/ls", "/pwd", "/mkdir", "/rmdir", "/rm", "/find", "/grep", "/calc", "/ps", "/kill", "/open", "/uninstall", "/cd", "/cat", "/history", "/layout", "/help",
 )
 
 private const val PREFS_NAME = "vixlauncher_preferences"
@@ -206,6 +224,7 @@ private data class CommandResult(
     val newPath: String? = null,
     val clearHistory: Boolean = false,
     val newGridLayout: Boolean? = null,
+    val clearOutput: Boolean = false,
 )
 
 private val Mono = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp)
@@ -423,6 +442,41 @@ private fun readTextPreview(path: File): String {
     }
 }
 
+private class ArithmeticParser(private val source: String) {
+    private var i = 0
+    fun parse(): Double {
+        val value = expression()
+        spaces()
+        require(i == source.length) { "Unexpected input near '${source.drop(i).take(12)}'" }
+        require(value.isFinite()) { "Result is not finite." }
+        return value
+    }
+    private fun spaces() { while (i < source.length && source[i].isWhitespace()) i++ }
+    private fun eat(c: Char): Boolean { spaces(); if (i < source.length && source[i] == c) { i++; return true }; return false }
+    private fun expression(): Double {
+        var n = term()
+        while (true) n = when { eat('+') -> n + term(); eat('-') -> n - term(); else -> return n }
+    }
+    private fun term(): Double {
+        var n = unary()
+        while (true) n = when {
+            eat('*') -> n * unary()
+            eat('/') -> { val d = unary(); require(d != 0.0) { "Division by zero." }; n / d }
+            eat('%') -> { val d = unary(); require(d != 0.0) { "Division by zero." }; n % d }
+            else -> return n
+        }
+    }
+    private fun unary(): Double {
+        if (eat('+')) return unary()
+        if (eat('-')) return -unary()
+        if (eat('(')) { val n = expression(); require(eat(')')) { "Missing )." }; return n }
+        spaces(); val start = i
+        while (i < source.length && (source[i].isDigit() || source[i] == '.')) i++
+        require(i > start) { "Expected a number." }
+        return source.substring(start, i).toDoubleOrNull() ?: error("Invalid number.")
+    }
+}
+
 private suspend fun executeLocalCommand(
     ctx: Context,
     input: String,
@@ -436,7 +490,9 @@ private suspend fun executeLocalCommand(
     val argument = command.substringAfter(' ', "").trim()
     return try {
         when (name) {
-            "clear", "gc" -> {
+            "clear" -> if (argument.isNotEmpty()) CommandResult("Usage: /clear", false)
+                else CommandResult("", clearOutput = true)
+            "free" -> {
                 if (argument.isNotEmpty()) CommandResult("Usage: /$name", false)
                 else {
                     onMemoryCleanup()
@@ -469,6 +525,77 @@ private suspend fun executeLocalCommand(
                         val directory = resolveExplorerPath(currentPath, argument)
                         CommandResult(listDirectory(directory), success = directory.isDirectory && directory.canRead())
                     }.getOrElse { CommandResult(it.message ?: "Directory unreadable", false) }
+                }
+            }
+            "pwd" -> if (argument.isNotEmpty()) CommandResult("Usage: /pwd", false) else CommandResult(currentPath)
+            "mkdir", "rmdir", "rm" -> {
+                if (argument.isBlank()) CommandResult("Usage: /$name <path>", false)
+                else withContext(Dispatchers.IO) {
+                    runCatching {
+                        val target = resolveExplorerPath(currentPath, argument)
+                        when (name) {
+                            "mkdir" -> if (target.exists()) CommandResult("Already exists: ${target.path}", false)
+                                else if (target.mkdirs()) CommandResult("Created directory: ${target.path}") else CommandResult("Could not create directory.", false)
+                            "rmdir" -> if (!target.isDirectory) CommandResult("Directory not found: ${target.path}", false)
+                                else if (target.delete()) CommandResult("Removed directory: ${target.path}") else CommandResult("Directory must be empty or is not writable.", false)
+                            else -> if (!target.isFile) CommandResult("File not found: ${target.path}", false)
+                                else if (target.delete()) CommandResult("Removed file: ${target.path}") else CommandResult("Could not remove file.", false)
+                        }
+                    }.getOrElse { CommandResult(it.message ?: "File operation failed.", false) }
+                }
+            }
+            "find" -> {
+                if (argument.isBlank()) CommandResult("Usage: /find <query>", false)
+                else withContext(Dispatchers.IO) {
+                    runCatching {
+                        val base = resolveExplorerPath(currentPath, "")
+                        val matches = base.walkTopDown().maxDepth(12).filter { it.isDirectory && it.name.contains(argument, true) }.take(100).map { it.path }.toList()
+                        CommandResult(if (matches.isEmpty()) "No matching folders." else matches.joinToString("\n"))
+                    }.getOrElse { CommandResult(it.message ?: "Search failed.", false) }
+                }
+            }
+            "grep" -> {
+                val pattern = argument.substringBefore(' ')
+                val fileArg = argument.substringAfter(' ', "").trim()
+                if (pattern.isBlank() || fileArg.isBlank()) CommandResult("Usage: /grep <pattern> <file>", false)
+                else withContext(Dispatchers.IO) {
+                    runCatching {
+                        val file = resolveExplorerPath(currentPath, fileArg)
+                        require(file.isFile && file.canRead()) { "File not readable: ${file.path}" }
+                        require(file.length() <= MAX_TEXT_FILE_BYTES) { "File too large; limit is 1 MiB." }
+                        val matches = file.readLines().take(20_000).mapIndexedNotNull { i, line -> if (line.contains(pattern, true)) "${i + 1}: $line" else null }
+                        CommandResult(matches.take(200).joinToString("\n").ifEmpty { "No matches." })
+                    }.getOrElse { CommandResult(it.message ?: "Search failed.", false) }
+                }
+            }
+            "calc" -> if (argument.isBlank()) CommandResult("Usage: /calc <expression>", false) else
+                runCatching { CommandResult(ArithmeticParser(argument).parse().toString()) }
+                    .getOrElse { CommandResult(it.message ?: "Invalid expression.", false) }
+            "ps" -> if (argument.isNotBlank()) CommandResult("Usage: /ps", false) else {
+                val am = ctx.getSystemService(ActivityManager::class.java)
+                @Suppress("DEPRECATION")
+                val processes = am?.runningAppProcesses.orEmpty()
+                CommandResult(processes.joinToString("\n") { "${it.processName} (pid ${it.pid})" }.ifEmpty { "No app processes are visible to this launcher." })
+            }
+            "kill" -> {
+                val app = findAppMatch(apps, argument)
+                if (app == null) CommandResult("Usage: /kill <app> — Android blocks launchers from force-stopping other apps.", false)
+                else CommandResult("Android blocks force-stopping other apps from a launcher. Open App Info to stop ${app.label}.", false,
+                    newPath = null).also { openAppInfo(ctx, app.packageName) }
+            }
+            "open" -> {
+                val app = findAppMatch(apps, argument)
+                if (argument.isBlank()) CommandResult("Usage: /open <app>", false)
+                else if (app == null) CommandResult("No matching launcher app found.", false)
+                else { launchApp(ctx, app); CommandResult("Opening ${app.label}.") }
+            }
+            "uninstall" -> {
+                val app = findAppMatch(apps, argument)
+                if (argument.isBlank()) CommandResult("Usage: /uninstall <app>", false)
+                else if (app == null) CommandResult("No matching launcher app found.", false)
+                else {
+                    val intent = Intent(Intent.ACTION_DELETE, Uri.fromParts("package", app.packageName, null)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    runCatching { ctx.startActivity(intent) }.fold({ CommandResult("Opened uninstall confirmation for ${app.label}.") }, { CommandResult("Couldn't open uninstall confirmation.", false) })
                 }
             }
             "cd" -> {
@@ -780,7 +907,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var reloadTick by remember { mutableIntStateOf(0) }
     var query by remember { mutableStateOf("") }
-    var commandOutput by remember { mutableStateOf<String?>(null) }
+    var commandOutput by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
     val preferences = remember(ctx) { ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
@@ -916,7 +1043,6 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
             commandMode = commandMode,
             onQueryChange = {
                 query = it
-                if (!it.trimStart().startsWith("/")) commandOutput = null
             },
             onSearch = {
                 if (commandMode) {
@@ -944,7 +1070,9 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                         }
                         if (query.trim() == entered) {
                             query = "/"
-                            commandOutput = result.output
+                            commandOutput = if (result.clearOutput) emptyList() else {
+                                listOf(entered to result.output.ifBlank { "(no output)" }) + commandOutput
+                            }
                         }
                     }
                 } else {
@@ -953,8 +1081,8 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
             },
         )
         if (commandMode) {
-            commandOutput?.let { output ->
-                TerminalOutput(output)
+            commandOutput.takeIf { it.isNotEmpty() }?.let { output ->
+                Box(Modifier.weight(1f).fillMaxWidth()) { TerminalOutput(output) }
             }
         } else {
             Spacer(Modifier.height(10.dp))
@@ -1120,17 +1248,24 @@ private fun AlphabetIndex(
 }
 
 @Composable
-private fun TerminalOutput(output: String) {
+private fun TerminalOutput(output: List<Pair<String, String>>) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(top = 6.dp, bottom = 8.dp)
             .border(1.dp, BORDER)
             .background(Color(0x66101318))
             .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
-        BasicText("┌─ LOCAL COMMAND ─", style = Mono.copy(color = DIM, fontSize = 10.sp))
-        BasicText(terminalAnnotatedText(output), style = Mono.copy(color = CYAN, fontSize = 11.sp))
+        output.forEachIndexed { index, (command, result) ->
+            BasicText(
+                "┌─ ${if (index == 0) "LATEST" else "PREVIOUS"} COMMAND: $command ─",
+                style = Mono.copy(color = DIM, fontSize = 10.sp),
+            )
+            BasicText(terminalAnnotatedText(result), style = Mono.copy(color = CYAN, fontSize = 11.sp))
+            if (index != output.lastIndex) Spacer(Modifier.height(7.dp))
+        }
     }
 }
 
