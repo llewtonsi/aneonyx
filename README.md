@@ -2,7 +2,9 @@
 
 A minimal Android home launcher with a **clean, terminal-style interface**.
 
-VixLauncher brings a shell-like prompt, a fast text-first app list, a collapsible system readout, and your blurred wallpaper to your Android home screen. The prompt uses the device's available user and device names instead of a hard-coded identity.
+VixLauncher brings a shell-like prompt, a searchable text-first app list, a collapsible system readout, and your blurred wallpaper to your Android home screen. The prompt uses the device's available user and device names instead of a hard-coded identity. The terminal accepts VixLauncher's built-in commands; it is not an unrestricted Android or Linux shell.
+
+**Current release:** 1.0.1 (version code 2) · **Minimum Android version:** Android 6.0 (API 23)
 
 <p align="center">
   <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="VixLauncher app icon" width="144">
@@ -43,7 +45,9 @@ Open the panel's **INFO** section to view device readouts:
 
 The panel stays idle while collapsed and samples only while the launcher is visible. RAM and network readings refresh every five seconds, CPU load every 15 seconds, and battery and disk readings every 30 seconds. Network rates are based on device-wide traffic counters. The CPU bar is a normalized load-average estimate, not a direct CPU utilization reading.
 
-Terminal commands run only when you press the keyboard's **Search** action. `/help` describes each command. `/apps [query]` searches the cached launchable-app list, and `/refresh` requests a fresh package-manager query. `/battery`, `/uptime`, and `/version` show local Android device/app information without network access. Deletion commands require an explicit `--confirm` argument and remain limited to shared storage exposed to the app. `/free` reports the managed heap snapshot; Android controls garbage collection. `/dnd` requires notification-policy access in Android Settings; use Android Quick Settings when you need a timed DND session.
+Terminal commands run only when you press the keyboard's **Search** action. `/help` describes each command. `/apps [query]` searches the cached launchable-app list, and `/refresh` requests a fresh package-manager query. `/battery`, `/uptime`, and `/version` show local Android device/app information without network access. Deletion commands require an explicit `--confirm` argument and remain limited to shared storage exposed to the app. `/free` reports the managed heap snapshot; Android controls garbage collection. `/dnd` toggles Do Not Disturb and requires notification-policy access in Android Settings. It does not schedule timed DND; use Android Quick Settings for that.
+
+The command list is not a general-purpose shell. `/ps` reports only processes Android makes visible, and `/kill` opens App Info because Android does not let launchers force-stop other apps. `/uninstall` opens Android's confirmation screen. Clipboard access occurs only when you run `/clip`.
 
 Android's scoped-storage rules may prevent direct file access to shared storage on newer Android versions. The file commands report inaccessible paths instead of requesting broad all-files access; use Android's file picker for locations protected by the system. Directory output is capped at 200 entries, and file previews at 20 lines/1 MiB to limit memory use. Actual launcher memory use depends on Android, the device, wallpaper size, and installed apps, so a fixed RAM ceiling cannot be guaranteed.
 
@@ -51,7 +55,7 @@ Android's scoped-storage rules may prevent direct file access to shared storage 
 
 ## 📱 Install on Android
 
-Download `VixLauncher.apk` from the [GitHub Releases page](https://github.com/llewtonsi/vixlauncher/releases) and open it on your phone. Android may ask you to allow installs from that source.
+Download the signed APK from the [latest GitHub Release](https://github.com/llewtonsi/vixlauncher/releases/latest) and open it on your phone. Android may ask you to allow installs from that source. The APK is distributed directly; VixLauncher is not currently published on Google Play.
 
 Then make VixLauncher your home app:
 
@@ -62,12 +66,6 @@ Then make VixLauncher your home app:
 The Android application ID is `com.llewtonsi.vixlauncher`. Builds using the earlier placeholder ID install as a separate app; their private preferences are not migrated to this ID.
 
 Press the Home button to use it. You can switch back to another launcher from the same setting.
-
-### Automatic GitHub releases
-
-Every push to the `main` branch builds the debug APK and publishes it as an asset on a new GitHub Release. You can also start the same workflow manually from the repository's **Actions** tab. The workflow uses the repository's built-in `GITHUB_TOKEN`; no extra GitHub secrets are needed.
-
-These automatic builds use Android's debug signing key, so they are intended for direct installation and testing. To distribute updates that install over an earlier build, configure a persistent release signing key in GitHub Actions secrets and use a signed release build.
 
 ---
 
@@ -95,11 +93,11 @@ app/build/outputs/vixlauncher/VixLauncher.apk
 
 Gradle also keeps its standard debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
 
-The optimized, minified release APK can be built with `./gradlew assembleRelease` and is written to `app/build/outputs/apk/release/app-release-unsigned.apk`. It is unsigned because this repository does not contain a release signing key. Configure a privately managed signing key before distributing it; do not commit signing credentials. The GitHub workflow continues to publish the debug-signed APK for testing and direct installation.
+The optimized, minified release APK can be built with `./gradlew assembleRelease` and is written to `app/build/outputs/apk/release/app-release-unsigned.apk`. This source repository does not contain the private release key, so the Gradle task produces an unsigned APK. To make a signed APK, use Android Studio's **Build → Generate Signed Bundle / APK → APK** flow and select the `release` build. Keep the keystore and passwords private and outside Git. The signed APK is uploaded manually to GitHub Releases; there is no workflow that automatically publishes debug builds.
 
 ### Google Play release readiness
 
-The current build targets API 35 and is not yet ready for Google Play submission. Google Play requires new apps and updates to target API 36 from 31 August 2026. Install Android SDK Platform 36, update the compatible Android Gradle Plugin/Gradle versions, then rerun tests and build the release App Bundle. Configure Play App Signing with a privately stored upload key; never use the debug-signed APK as the production update identity. Also complete the Play listing, content and Data safety declarations, privacy policy where applicable, and the testing requirements for the developer account. See the current [target API policy](https://support.google.com/googleplay/android-developer/answer/11926878) and [app signing guide](https://developer.android.com/studio/publish/app-signing).
+The current build targets API 35 and is not ready for Google Play submission. Google Play requires new apps and updates to target API 36 from 31 August 2026. Install Android SDK Platform 36, update the compatible Android Gradle Plugin/Gradle versions, then rerun tests and build the release App Bundle. See Google's [target API policy](https://support.google.com/googleplay/android-developer/answer/11926878) and [app signing guide](https://developer.android.com/studio/publish/app-signing).
 
 To install the generated APK on a connected device with USB debugging enabled:
 
