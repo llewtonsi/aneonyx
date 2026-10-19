@@ -2,7 +2,7 @@
 
 A minimal Android home launcher with a **clean, terminal-style interface**.
 
-VixLauncher brings a shell-like prompt, a fast text-first app list, and a collapsible system readout to your Android home screen. The prompt uses the device's available user and device names instead of a hard-coded identity.
+VixLauncher brings a shell-like prompt, a fast text-first app list, a collapsible system readout, and your blurred wallpaper to your Android home screen. The prompt uses the device's available user and device names instead of a hard-coded identity.
 
 <p align="center">
   <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="VixLauncher app icon" width="144">
@@ -19,13 +19,15 @@ VixLauncher brings a shell-like prompt, a fast text-first app list, and a collap
 * A shell-style prompt that reads the available Android profile name and device name
 * Text-first app rows without app icons
 * Live app count and a search field for filtering installed apps
+* Apps grouped under sticky alphabetical headings, with a draggable A–Z rail that jumps to the nearest available section
 * Press the keyboard's **Search** action to open the first matching app
 * Long-press an app to open its Android app info page
 * The launcher refreshes its app list when apps are installed, removed, or updated
+* The selected system wallpaper displayed with a blur behind the launcher
 
-### 📊 Collapsible `SYS://VITALS` panel
+### 📊 Collapsible `SYSTEM` panel
 
-Open the panel to view device readouts:
+Open the panel's **INFO** section to view device readouts:
 
 * 🔋 Battery level and charging state
 * 🧠 Device RAM usage

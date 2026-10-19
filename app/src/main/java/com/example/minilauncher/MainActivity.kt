@@ -27,10 +27,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
@@ -48,6 +53,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,6 +61,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -63,6 +70,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -83,6 +91,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import android.graphics.Bitmap
@@ -120,8 +129,6 @@ class MainActivity : ComponentActivity() {
 
 // ───────────────────────────── Theme constants ─────────────────────────────
 
-private val BG = Color(0xFF08090C)
-private val PANEL = Color(0xFF101318)
 private val BORDER = Color(0xFF262B35)
 private val GREEN = Color(0xFF00FF66)
 private val CYAN = Color(0xFF00E5FF)
@@ -129,13 +136,17 @@ private val AMBER = Color(0xFFFFCC00)
 private val RED = Color(0xFFFF2A6D)
 private val DIM = Color(0xFF858B98)
 private val TEXT = Color(0xFFE0E0E0)
+private val ALPHABET = ('A'..'Z').toList() + '#'
 
 private val Mono = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp)
 
 private fun loadWallpaper(ctx: Context): ImageBitmap? = runCatching {
     val drawable = WallpaperManager.getInstance(ctx).drawable ?: return null
-    val width = drawable.intrinsicWidth.coerceAtLeast(1)
-    val height = drawable.intrinsicHeight.coerceAtLeast(1)
+    val sourceWidth = drawable.intrinsicWidth.coerceAtLeast(1)
+    val sourceHeight = drawable.intrinsicHeight.coerceAtLeast(1)
+    val scale = minOf(1f, 2048f / maxOf(sourceWidth, sourceHeight))
+    val width = (sourceWidth * scale).toInt().coerceAtLeast(1)
+    val height = (sourceHeight * scale).toInt().coerceAtLeast(1)
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     Canvas(bitmap).also { canvas ->
         drawable.setBounds(0, 0, canvas.width, canvas.height)
@@ -227,7 +238,7 @@ private data class Stats(
     val txBytesPerSec: Long? = null,
 )
 
-private fun readStats(ctx: Context): Stats {
+private fun readStats(ctx: Context, previous: Stats?, refreshDisk: Boolean): Stats {
     // RAM
     val am = ctx.getSystemService(ActivityManager::class.java)
     val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
@@ -237,15 +248,17 @@ private fun readStats(ctx: Context): Stats {
 
     // StatFs reports the shared internal data volume without requesting storage
     // access permission. It reflects device storage use, including system data.
-    val diskStats = runCatching {
-        val stat = StatFs(Environment.getDataDirectory().path)
-        val total = stat.totalBytes / (1024 * 1024)
-        val free = stat.availableBytes / (1024 * 1024)
-        Triple((total - free).coerceAtLeast(0), total, free)
-    }.getOrElse { Triple(0L, 0L, 0L) }
-    val diskPct = if (diskStats.second > 0) {
-        (diskStats.first * 100 / diskStats.second).toInt()
-    } else 0
+    val diskStats = if (!refreshDisk && previous != null) {
+        Triple(previous.diskUsedMb, previous.diskTotalMb, previous.diskPct)
+    } else {
+        runCatching {
+            val stat = StatFs(Environment.getDataDirectory().path)
+            val total = stat.totalBytes / (1024 * 1024)
+            val free = stat.availableBytes / (1024 * 1024)
+            val used = (total - free).coerceAtLeast(0)
+            Triple(used, total, if (total > 0) (used * 100 / total).toInt() else 0)
+        }.getOrElse { Triple(0L, 0L, 0) }
+    }
 
     // CPU "state": /proc/stat is blocked for apps on Android 8+, so we report
     // core count and load average (best effort).
@@ -267,7 +280,7 @@ private fun readStats(ctx: Context): Stats {
 
     return Stats(
         usedMb, totalMb, ramPct,
-        diskStats.first, diskStats.second, diskPct,
+        diskStats.first, diskStats.second, diskStats.third,
         cores, load, batPct, charging,
         rxBytes, txBytes, SystemClock.elapsedRealtime(),
     )
@@ -324,11 +337,17 @@ private fun TelemetryBanner(lifecycleOwner: LifecycleOwner) {
     LaunchedEffect(lifecycleOwner, expanded) {
         if (expanded) lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var previousSample: Stats? = null
+            var lastDiskRefreshMs = 0L
             while (true) {
-                val sample = withContext(Dispatchers.IO) { readStats(ctx) }
+                val now = SystemClock.elapsedRealtime()
+                val refreshDisk = previousSample == null || now - lastDiskRefreshMs >= 30_000L
+                val sample = withContext(Dispatchers.IO) {
+                    readStats(ctx, previousSample, refreshDisk)
+                }
                 stats = withNetworkRates(sample, previousSample)
                 previousSample = sample
-                delay(5_000)
+                if (refreshDisk) lastDiskRefreshMs = sample.sampledAtMs
+                delay(1_000)
             }
         }
     }
@@ -338,7 +357,7 @@ private fun TelemetryBanner(lifecycleOwner: LifecycleOwner) {
             .fillMaxWidth()
             .animateContentSize()
             .border(1.dp, BORDER)
-            .background(PANEL)
+            .background(Color.Transparent)
     ) {
         Row(
             Modifier
@@ -350,7 +369,7 @@ private fun TelemetryBanner(lifecycleOwner: LifecycleOwner) {
             BasicText("◈", style = Mono.copy(color = CYAN, fontSize = 15.sp))
             Spacer(Modifier.width(8.dp))
             BasicText(
-                "SYS://VITALS",
+                "SYSTEM",
                 style = Mono.copy(color = GREEN),
                 modifier = Modifier.weight(1f),
             )
@@ -368,7 +387,7 @@ private fun TelemetryBanner(lifecycleOwner: LifecycleOwner) {
 
         Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp)) {
             BasicText(
-                "┌─ SYSTEM ────────────────────────────",
+                "┌─ INFO ──────────────────────────────",
                 style = Mono.copy(color = DIM, fontSize = 10.sp),
             )
             val s = stats
@@ -413,13 +432,15 @@ private fun TelemetryBanner(lifecycleOwner: LifecycleOwner) {
 // ───────────────────────────── Main screen ─────────────────────────────
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     val ctx = LocalContext.current
     val pm = remember(ctx) { ctx.packageManager }
     val focus = LocalFocusManager.current
     val haptics = LocalHapticFeedback.current
+    val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
     val prompt = remember(ctx) { readPromptIdentity(ctx) }
-    val wallpaper = remember(ctx) { loadWallpaper(ctx) }
+    var wallpaper by remember(ctx) { mutableStateOf<ImageBitmap?>(null) }
 
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var reloadTick by remember { mutableIntStateOf(0) }
@@ -430,6 +451,11 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     LaunchedEffect(reloadTick) {
         val loaded = withContext(Dispatchers.IO) { loadApps(pm) }
         apps = loaded
+    }
+
+    // Decode and rasterize the wallpaper away from the UI thread.
+    LaunchedEffect(ctx) {
+        wallpaper = withContext(Dispatchers.IO) { loadWallpaper(ctx) }
     }
 
     // Keep the list fresh when apps are installed / updated / removed.
@@ -465,6 +491,26 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     val filtered = remember(apps, query) {
         val q = query.trim().lowercase(Locale.ROOT)
         if (q.isEmpty()) apps else apps.filter { it.searchLabel.contains(q) }
+    }
+    val appSections = remember(filtered) {
+        filtered.groupBy { app -> app.label.firstOrNull()?.uppercaseChar()?.takeIf { it in 'A'..'Z' } ?: '#' }
+            .toList()
+    }
+    val availableLetters = remember(appSections) { appSections.map { it.first } }
+    val sectionStarts = remember(appSections) {
+        buildList {
+            var start = 0
+            appSections.forEach { (letter, entries) ->
+                add(letter to start)
+                start += entries.size + 1 // one sticky letter heading per section
+            }
+        }
+    }
+    val currentLetter by remember(filtered, listState) {
+        derivedStateOf {
+            sectionStarts.lastOrNull { it.second <= listState.firstVisibleItemIndex }?.first
+                ?: sectionStarts.firstOrNull()?.first ?: '#'
+        }
     }
 
     androidx.compose.foundation.layout.Box(Modifier.fillMaxSize()) {
@@ -511,27 +557,112 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
             modifier = Modifier.padding(bottom = 4.dp),
         )
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-        ) {
-            items(
-                items = filtered,
-                key = { it.key },
-                contentType = { "app-row" },
-            ) { app ->
-                AppRow(
-                    app = app,
-                    onClick = { launchApp(ctx, app) },
-                    onLongClick = {
-                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        openAppInfo(ctx, app.packageName)
+        Row(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+            ) {
+                appSections.forEach { (letter, sectionApps) ->
+                    stickyHeader(key = "section-$letter") {
+                        BasicText(
+                            text = "── $letter ──",
+                            style = Mono.copy(color = CYAN, fontSize = 10.sp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                        )
+                    }
+                    items(
+                        items = sectionApps,
+                        key = { it.key },
+                        contentType = { "app-row" },
+                    ) { app ->
+                        AppRow(
+                            app = app,
+                            onClick = { launchApp(ctx, app) },
+                            onLongClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                openAppInfo(ctx, app.packageName)
+                            },
+                        )
+                    }
+                }
+            }
+            AlphabetIndex(
+                letters = ALPHABET,
+                availableLetters = availableLetters,
+                selectedLetter = currentLetter,
+                onSelect = { letter ->
+                    val target = sectionStarts.firstOrNull { it.first == letter }?.second ?: -1
+                    if (target >= 0) coroutineScope.launch { listState.scrollToItem(target) }
+                },
+            )
+        }
+        }
+    }
+}
+
+@Composable
+private fun AlphabetIndex(
+    letters: List<Char>,
+    availableLetters: List<Char>,
+    selectedLetter: Char,
+    onSelect: (Char) -> Unit,
+) {
+    val latestOnSelect = rememberUpdatedState(onSelect)
+    val latestAvailableLetters = rememberUpdatedState(availableLetters)
+    Column(
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(22.dp)
+            .pointerInput(letters) {
+                fun selectAt(y: Float) {
+                    if (letters.isEmpty() || size.height == 0) return
+                    val fraction = (y / size.height).coerceIn(0f, 0.9999f)
+                    val targetIndex = (fraction * letters.size).toInt()
+                    val nearest = latestAvailableLetters.value.minByOrNull {
+                        kotlin.math.abs(letters.indexOf(it) - targetIndex)
+                    }
+                    if (nearest != null) latestOnSelect.value(nearest)
+                }
+                detectVerticalDragGestures(
+                    onDragStart = { selectAt(it.y) },
+                    onVerticalDrag = { change, _ ->
+                        change.consume()
+                        selectAt(change.position.y)
                     },
                 )
             }
-        }
+            .pointerInput(letters) {
+                detectTapGestures { position ->
+                    if (letters.isNotEmpty() && latestAvailableLetters.value.isNotEmpty() && size.height > 0) {
+                        val fraction = (position.y / size.height).coerceIn(0f, 0.9999f)
+                        val targetIndex = (fraction * letters.size).toInt()
+                        val nearest = latestAvailableLetters.value.minByOrNull {
+                            kotlin.math.abs(letters.indexOf(it) - targetIndex)
+                        }
+                        if (nearest != null) latestOnSelect.value(nearest)
+                    }
+                }
+            },
+        verticalArrangement = Arrangement.SpaceEvenly,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        letters.forEach { letter ->
+            val selected = letter == selectedLetter
+            BasicText(
+                text = letter.toString(),
+                style = Mono.copy(
+                    color = when {
+                        selected -> GREEN
+                        letter in availableLetters -> DIM
+                        else -> DIM.copy(alpha = 0.28f)
+                    },
+                    fontSize = if (selected) 11.sp else 9.sp,
+                    lineHeight = 14.sp,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(18.dp),
+            )
         }
     }
 }
