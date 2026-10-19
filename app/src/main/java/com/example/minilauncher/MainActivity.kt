@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.app.WallpaperManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -48,6 +49,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.Image
@@ -274,6 +276,18 @@ private fun launchApp(ctx: Context, app: AppEntry) {
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
     runCatching { ctx.startActivity(intent) }
 }
+
+private fun loadAppIcon(ctx: Context, app: AppEntry): ImageBitmap? = runCatching {
+    val drawable = ctx.packageManager.getActivityIcon(ComponentName(app.packageName, app.activityName))
+    val iconSize = 96
+    val bitmap = Bitmap.createBitmap(iconSize, iconSize, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val oldBounds = drawable.bounds
+    drawable.setBounds(0, 0, iconSize, iconSize)
+    drawable.draw(canvas)
+    drawable.bounds = oldBounds
+    bitmap.asImageBitmap()
+}.getOrNull()
 
 private fun openAppInfo(ctx: Context, packageName: String): Boolean {
     val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
@@ -890,9 +904,10 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
 
         SearchField(
             query = query,
+            commandMode = commandMode,
             onQueryChange = {
                 query = it
-                commandOutput = null
+                if (!it.trimStart().startsWith("/")) commandOutput = null
             },
             onSearch = {
                 if (commandMode) {
@@ -918,7 +933,10 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                             commandHistory = (commandHistory + entered).takeLast(MAX_COMMAND_HISTORY)
                             preferences.edit().putString(PREF_COMMAND_HISTORY, commandHistory.joinToString("\n")).apply()
                         }
-                        commandOutput = result.output
+                        if (query.trim() == entered) {
+                            query = "/"
+                            commandOutput = result.output
+                        }
                     }
                 } else {
                     filtered.firstOrNull()?.let { launchApp(ctx, it) }
@@ -946,11 +964,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                     ) {
                         appSections.forEach { (letter, sectionApps) ->
                             item(key = "section-$letter", span = { GridItemSpan(maxLineSpan) }) {
-                                BasicText(
-                                    text = "── $letter ──",
-                                    style = Mono.copy(color = CYAN, fontSize = 10.sp),
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
-                                )
+                                AlphabetSectionHeader(letter)
                             }
                             gridItems(
                                 items = sectionApps,
@@ -976,11 +990,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                     ) {
                         appSections.forEach { (letter, sectionApps) ->
                             stickyHeader(key = "section-$letter") {
-                                BasicText(
-                                    text = "── $letter ──",
-                                    style = Mono.copy(color = CYAN, fontSize = 10.sp),
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
-                                )
+                                AlphabetSectionHeader(letter)
                             }
                             items(
                                 items = sectionApps,
@@ -1013,6 +1023,22 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
             }
         }
         }
+    }
+}
+
+@Composable
+private fun AlphabetSectionHeader(letter: Char) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Spacer(Modifier.weight(1f).height(1.dp).background(CYAN.copy(alpha = 0.65f)))
+        BasicText(
+            text = letter.toString(),
+            style = Mono.copy(color = CYAN, fontSize = 11.sp),
+            modifier = Modifier.padding(horizontal = 9.dp),
+        )
+        Spacer(Modifier.weight(1f).height(1.dp).background(CYAN.copy(alpha = 0.65f)))
     }
 }
 
@@ -1120,6 +1146,7 @@ private fun terminalAnnotatedText(output: String) = buildAnnotatedString {
 @Composable
 private fun SearchField(
     query: String,
+    commandMode: Boolean,
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
 ) {
@@ -1139,7 +1166,10 @@ private fun SearchField(
                     .padding(top = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                BasicText("└──>", style = Mono.copy(color = GREEN, fontSize = 14.sp))
+                BasicText(
+                    text = if (commandMode) "└─CMD>" else "└──>",
+                    style = Mono.copy(color = if (commandMode) CYAN else GREEN, fontSize = 14.sp),
+                )
                 Spacer(Modifier.width(7.dp))
                 inner()
             }
@@ -1178,16 +1208,27 @@ private fun AppGridCell(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
+    val context = LocalContext.current
+    var icon by remember(app.key) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(context, app.key) {
+        icon = withContext(Dispatchers.IO) { loadAppIcon(context, app) }
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(68.dp)
+            .height(82.dp)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 5.dp, vertical = 8.dp),
+            .padding(horizontal = 5.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        BasicText("›", style = Mono.copy(color = GREEN, fontSize = 14.sp))
+        icon?.let {
+            Image(
+                bitmap = it,
+                contentDescription = "${app.label} icon",
+                modifier = Modifier.size(42.dp),
+            )
+        } ?: Spacer(Modifier.size(42.dp))
         BasicText(
             text = app.label,
             maxLines = 1,
