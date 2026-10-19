@@ -49,6 +49,12 @@ Then make VixLauncher your home app:
 
 Press the Home button to use it. You can switch back to another launcher from the same setting.
 
+### Automatic GitHub releases
+
+Every push to the `main` branch builds the debug APK and publishes it as an asset on a new GitHub Release. You can also start the same workflow manually from the repository's **Actions** tab. The workflow uses the repository's built-in `GITHUB_TOKEN`; no extra GitHub secrets are needed.
+
+These automatic builds use Android's debug signing key, so they are intended for direct installation and testing. To distribute updates that install over an earlier build, configure a persistent release signing key in GitHub Actions secrets and use a signed release build.
+
 ---
 
 ## 🚀 Build from source
