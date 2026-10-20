@@ -89,15 +89,9 @@ cd aneonyx
 ./gradlew assembleDebug
 ```
 
-The product-named debug APK is created at:
+The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
 
-```text
-app/build/outputs/aneonyx/Aneonyx.apk
-```
-
-Gradle also keeps its standard debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
-
-The optimized, minified release APK can be built with `./gradlew assembleRelease` and is written to `app/build/outputs/apk/release/app-release-unsigned.apk`. This source repository does not contain the private release key, so the Gradle task produces an unsigned APK. To make a signed APK, use Android Studio's **Build → Generate Signed Bundle / APK → APK** flow and select the `release` build. Keep the keystore and passwords private and outside Git. The signed APK is uploaded manually to GitHub Releases; there is no workflow that automatically publishes debug builds.
+The optimized, minified release APK can be built with `./gradlew assembleRelease`. When `keystore.properties` points to a valid private release keystore, Gradle signs the APK and copies it to `app/release/Aneonyx.apk`; without that configuration, Gradle produces an unsigned APK at `app/build/outputs/apk/release/app-release-unsigned.apk`. Keep the keystore and passwords private and outside Git. Upload the signed APK manually to GitHub Releases; there is no automated publishing workflow.
 
 ### Google Play release readiness
 
@@ -106,7 +100,7 @@ The current build targets API 35 and is not ready for Google Play submission. Go
 To install the generated APK on a connected device with USB debugging enabled:
 
 ```bash
-adb install -r app/build/outputs/aneonyx/Aneonyx.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 You can also open the project in Android Studio, sync Gradle, and run the `app` configuration on a connected phone or emulator.

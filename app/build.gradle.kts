@@ -1,7 +1,17 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        load(FileInputStream(keystorePropertiesFile))
+    }
 }
 
 android {
@@ -25,6 +35,18 @@ android {
         compose = true
     }
 
+    signingConfigs {
+        create("release") {
+            val storeFilePath = keystoreProperties["storeFile"] as? String
+            if (!storeFilePath.isNullOrEmpty()) {
+                storeFile = file(storeFilePath)
+                storePassword = keystoreProperties["storePassword"] as? String
+                keyAlias = keystoreProperties["keyAlias"] as? String
+                keyPassword = keystoreProperties["keyPassword"] as? String
+            }
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isDebuggable = false
@@ -34,21 +56,23 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile != null) {
+                signingConfig = releaseSigning
+            }
         }
     }
 }
 
-// Keep Android Gradle Plugin's standard output for tooling, and also create a
-// product-named APK that is easier to find and share.
-val copyDebugApk = tasks.register<Copy>("copyDebugApk") {
-    from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
-    into(layout.buildDirectory.dir("outputs/aneonyx"))
+val copyReleaseApk = tasks.register<Copy>("copyReleaseApk") {
+    from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
+    into(project.file("release"))
     rename { "Aneonyx.apk" }
 }
 
 tasks.configureEach {
-    if (name == "packageDebug") {
-        finalizedBy(copyDebugApk)
+    if (name == "packageRelease") {
+        finalizedBy(copyReleaseApk)
     }
 }
 
