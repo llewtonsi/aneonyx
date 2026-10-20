@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Aneonyx</string>
+    <string name="device_admin_description">Allow Aneonyx to lock the screen when you double-tap the launcher background.</string>
+</resources>

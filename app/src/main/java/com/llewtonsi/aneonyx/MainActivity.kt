@@ -1,7 +1,7 @@
 package com.llewtonsi.aneonyx
 
 import android.app.ActivityManager
-import android.app.NotificationManager
+import android.app.admin.DevicePolicyManager
 import android.app.WallpaperManager
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -19,7 +19,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.StatFs
 import android.os.SystemClock
-import android.os.UserManager
+import android.util.LruCache
 import android.provider.Settings
 import android.hardware.display.DisplayManager
 import android.util.DisplayMetrics
@@ -29,7 +29,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
@@ -68,6 +70,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.Immutable
@@ -75,6 +78,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -103,6 +107,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -120,6 +125,7 @@ import android.graphics.Canvas
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.nio.file.Files
 
 // ───────────────────────────── Activity ─────────────────────────────
 
@@ -154,82 +160,112 @@ class MainActivity : ComponentActivity() {
 
 private val BORDER = Color(0xFF262B35)
 private val GREEN = Color(0xFF00FF66)
-private val CYAN = Color(0xFF00E5FF)
 private val AMBER = Color(0xFFFFCC00)
 private val RED = Color(0xFFFF2A6D)
 private val DIM = Color(0xFF858B98)
 private val TEXT = Color(0xFFE0E0E0)
+private data class AccentTheme(val name: String, val color: Color)
+private val ACCENT_THEMES = listOf(
+    AccentTheme("green", Color(0xFF00FF66)),
+    AccentTheme("blue", Color(0xFF5B9DFF)),
+    AccentTheme("violet", Color(0xFFC792EA)),
+    AccentTheme("amber", Color(0xFFFFC247)),
+    AccentTheme("rose", Color(0xFFFF6B8A)),
+    AccentTheme("white", Color(0xFFE0E0E0)),
+)
+private val LocalAccent = compositionLocalOf { GREEN }
+private fun accentTheme(name: String): AccentTheme =
+    ACCENT_THEMES.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: ACCENT_THEMES.first()
 private val ALPHABET = ('A'..'Z').toList() + '#'
 private val COMMAND_HELP = """AVAILABLE COMMANDS
-/clear
+clear
   Clear the terminal output.
-/free
-  Show Aneonyx's managed heap usage. Android manages garbage collection automatically.
-/apps [query]
+exit
+  Leave CLI mode and return to the app list.
+free
+  Clear Aneonyx's cache files and release the wallpaper bitmap. Android manages system memory.
+apps [query]
   List up to 100 launchable apps, optionally filtered by label or package name.
-/refresh
+refresh
   Refresh the cached launcher app list from Android.
-/battery
+battery
   Show the current battery level, charging state, temperature, and voltage.
-/uptime
+uptime
   Show how long the device has been running since its last boot.
-/version
+version
   Show Aneonyx and Android version information.
-/time
+time
   Show the current local time.
-/sysinfo
-  Show device, Android, CPU ABI, and display information.
-/pkg <query>
+sysinfo
+  Show available hardware, Android build, RAM, storage, CPU, battery, display, and runtime details.
+pkg <query>
   Open Android App Info for the first matching launcher app.
-/clip [clear]
+clip [clear]
   Show plain-text clipboard contents, or clear the clipboard.
-/dnd [minutes]
-  Toggle Do Not Disturb. Use Android Quick Settings to set a timed session.
-/ls [subfolder]
-  List files and folders in the current directory or a relative subfolder.
-/pwd
+ls [--page <number>] [subfolder]
+  List files and folders, including hidden entries, 80 at a time; follow Next to continue.
+favorites
+  List pinned launcher apps.
+pin <app>
+  Pin a launcher app to the top of the app list.
+unpin <app>
+  Remove a launcher app from pinned apps.
+hide <app>
+  Hide an app from the launcher list and search.
+unhide <app>
+  Restore a hidden app to the launcher list and search.
+theme [list|name]
+  List or change the launcher accent theme.
+pwd
   Print the current directory.
-/mkdir <directory> | /rmdir --confirm <directory> | /rm --confirm <file>
+mkdir <directory> | rmdir --confirm <directory> | rm --confirm <file>
   Create or remove items in shared storage. Deletion requires --confirm.
-/find <query>
-  Find matching folders under the current directory.
-/grep <pattern> <file>
-  Print matching lines from a text file.
-/calc <expression>
+find <query>
+  Find matching folders under the current directory, scanning up to 5,000 entries.
+grep <pattern> <file>
+  Print matching lines, scanning up to 20,000 lines and 200 matches.
+calc <expression>
   Calculate arithmetic expressions with +, -, *, /, %, and parentheses.
-/ps | /kill <app>
-  Show visible app processes. Android does not let launchers force-stop other apps.
-/open <app> | /uninstall <app>
+ps
+  Show processes Android makes visible to this app.
+open <app> | uninstall <app>
   Launch an app or open Android's uninstall confirmation.
-/cd <directory>
-  Change directory. Use /cd .. to move up one directory.
-/cat <filename>
+cd <directory>
+  Change directory. Use cd .. to move up one directory.
+cat <filename>
   Show the first 20 lines of a text file up to 1 MiB.
-/history [clear]
+history [clear]
   Show the last 20 successful commands, or clear the saved history.
-/layout <grid|list>
+layout <grid|list>
   Switch the app drawer layout and save your choice.
-/help
+help
   Show this command list.
 
 Android manages app garbage collection and system memory automatically."""
 
 private val HELP_COMMAND_TOKENS = listOf(
-    "/clear", "/free", "/apps", "/refresh", "/battery", "/uptime", "/version",
-    "/time", "/sysinfo", "/pkg", "/clip", "/dnd",
-    "/ls", "/pwd", "/mkdir", "/rmdir", "/rm", "/find", "/grep", "/calc", "/ps", "/kill", "/open", "/uninstall", "/cd", "/cat", "/history", "/layout", "/help",
+    "clear", "exit", "free", "apps", "refresh", "battery", "uptime", "version",
+    "time", "sysinfo", "pkg", "clip",
+    "ls", "pwd", "mkdir", "rmdir", "rm", "find", "grep", "calc", "ps", "open", "uninstall", "cd", "cat", "favorites", "pin", "unpin", "hide", "unhide", "theme", "history", "layout", "help",
 )
 
 private const val PREFS_NAME = "aneonyx_preferences"
 private const val PREF_COMMAND_HISTORY = "command_history"
 private const val PREF_GRID_LAYOUT = "grid_layout"
+private const val PREF_FAVORITE_APPS = "favorite_apps"
+private const val PREF_HIDDEN_APPS = "hidden_apps"
+private const val PREF_ACCENT_THEME = "accent_theme"
 private const val MAX_COMMAND_HISTORY = 20
 private const val MAX_TERMINAL_OUTPUT_ENTRIES = 20
-private const val MAX_TERMINAL_OUTPUT_CHARS = 8_000
+private const val MAX_TERMINAL_OUTPUT_CHARS = 32_000
 private const val MAX_COMMAND_INPUT_CHARS = 512
-private const val MAX_LISTING_ENTRIES = 200
 private const val MAX_FIND_ENTRIES = 5_000
 private const val MAX_TEXT_FILE_BYTES = 1024L * 1024L
+private const val MAX_DIRECTORY_PAGE_SIZE = 80
+private const val MAX_GREP_LINES = 20_000
+private const val MAX_GREP_MATCHES = 200
+private const val MAX_GREP_LINE_CHARS = 2_000
+private const val ICON_CACHE_BYTES = 512 * 1024
 private const val TELEMETRY_REFRESH_MS = 5_000L
 private const val CPU_REFRESH_MS = 15_000L
 private const val BATTERY_REFRESH_MS = 30_000L
@@ -243,15 +279,24 @@ private data class CommandResult(
     val newGridLayout: Boolean? = null,
     val clearOutput: Boolean = false,
     val refreshApps: Boolean = false,
+    val newFavoriteKeys: Set<String>? = null,
+    val exitCli: Boolean = false,
+    val releaseWallpaper: Boolean = false,
+    val newHiddenAppKeys: Set<String>? = null,
+    val newThemeName: String? = null,
 )
 
 private val Mono = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp)
+private val appIconCache = object : LruCache<String, ImageBitmap>(ICON_CACHE_BYTES) {
+    override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * 4
+}
+private val lsPagePattern = Regex("^--page\\s+(\\d+)(?:\\s+(.*))?$")
 
 private fun loadWallpaper(ctx: Context): ImageBitmap? = runCatching {
     val drawable = WallpaperManager.getInstance(ctx).drawable ?: return null
     val sourceWidth = drawable.intrinsicWidth.coerceAtLeast(1)
     val sourceHeight = drawable.intrinsicHeight.coerceAtLeast(1)
-    val scale = minOf(1f, 2048f / maxOf(sourceWidth, sourceHeight))
+    val scale = minOf(1f, 1024f / maxOf(sourceWidth, sourceHeight))
     val width = (sourceWidth * scale).toInt().coerceAtLeast(1)
     val height = (sourceHeight * scale).toInt().coerceAtLeast(1)
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -272,30 +317,6 @@ private data class AppEntry(
     val searchLabel: String = label.lowercase(Locale.ROOT),
     val key: String = "$packageName/$activityName",
 )
-
-private data class PromptIdentity(val username: String, val deviceName: String)
-
-private fun promptToken(value: String, fallback: String): String = value
-    .trim()
-    .replace(Regex("\\s+"), "-")
-    .ifEmpty { fallback }
-
-private fun readPromptIdentity(ctx: Context): PromptIdentity {
-    val userManager = ctx.getSystemService(UserManager::class.java)
-    val profileName = if (Build.VERSION.SDK_INT >= 24) {
-        runCatching { userManager?.userName }.getOrNull().orEmpty()
-    } else ""
-
-    val configuredDeviceName = if (Build.VERSION.SDK_INT >= 25) {
-        runCatching { Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME) }
-            .getOrNull().orEmpty()
-    } else ""
-
-    return PromptIdentity(
-        username = promptToken(profileName, "user"),
-        deviceName = promptToken(configuredDeviceName.ifBlank { Build.MODEL }, "android"),
-    )
-}
 
 private fun loadApps(pm: PackageManager): List<AppEntry> {
     val query = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -318,17 +339,20 @@ private fun launchApp(ctx: Context, app: AppEntry) {
     runCatching { ctx.startActivity(intent) }
 }
 
-private fun loadAppIcon(ctx: Context, app: AppEntry): ImageBitmap? = runCatching {
-    val drawable = ctx.packageManager.getActivityIcon(ComponentName(app.packageName, app.activityName))
-    val iconSize = 96
-    val bitmap = Bitmap.createBitmap(iconSize, iconSize, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    val oldBounds = drawable.bounds
-    drawable.setBounds(0, 0, iconSize, iconSize)
-    drawable.draw(canvas)
-    drawable.bounds = oldBounds
-    bitmap.asImageBitmap()
-}.getOrNull()
+private fun loadAppIcon(ctx: Context, app: AppEntry): ImageBitmap? {
+    appIconCache.get(app.key)?.let { return it }
+    return runCatching {
+        val drawable = ctx.packageManager.getActivityIcon(ComponentName(app.packageName, app.activityName))
+        val iconSize = 96
+        val bitmap = Bitmap.createBitmap(iconSize, iconSize, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val oldBounds = drawable.bounds
+        drawable.setBounds(0, 0, iconSize, iconSize)
+        drawable.draw(canvas)
+        drawable.bounds = oldBounds
+        bitmap.asImageBitmap().also { appIconCache.put(app.key, it) }
+    }.getOrNull()
+}
 
 private fun openAppInfo(ctx: Context, packageName: String): Boolean {
     val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
@@ -350,7 +374,7 @@ private fun findAppMatch(apps: List<AppEntry>, query: String): AppEntry? {
         }
 }
 
-private fun deviceInfo(ctx: Context): String {
+private fun systemInfo(ctx: Context): String {
     val display = ctx.getSystemService(DisplayManager::class.java)
         ?.getDisplay(Display.DEFAULT_DISPLAY)
     val metrics = DisplayMetrics()
@@ -362,12 +386,42 @@ private fun deviceInfo(ctx: Context): String {
         "${metrics.widthPixels} × ${metrics.heightPixels}px"
     } else "unavailable"
     val refreshRate = display?.refreshRate?.let { "%.1f Hz".format(Locale.ROOT, it) } ?: "unavailable"
-    val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: System.getProperty("os.arch", "unknown")
-    return """DEVICE  ${Build.MANUFACTURER} ${Build.MODEL}
-ANDROID ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})
-CPU ABI $abi
-DISPLAY $resolution @ $refreshRate
-KERNEL  ${System.getProperty("os.version", "unknown")}"""
+    val am = ctx.getSystemService(ActivityManager::class.java)
+    val memory = ActivityManager.MemoryInfo()
+    val ram = if (am != null) runCatching { am.getMemoryInfo(memory); memory }.getOrNull() else null
+    val storage = runCatching { StatFs(Environment.getDataDirectory().path) }.getOrNull()
+    val ramTotal = ram?.totalMem?.let(::formatBytes) ?: "unavailable"
+    val ramAvailable = ram?.availMem?.let(::formatBytes) ?: "unavailable"
+    val ramUsed = if (ram != null) formatBytes((ram.totalMem - ram.availMem).coerceAtLeast(0)) else "unavailable"
+    val storageTotal = storage?.totalBytes?.let(::formatBytes) ?: "unavailable"
+    val storageAvailable = storage?.availableBytes?.let(::formatBytes) ?: "unavailable"
+    val storageUsed = if (storage != null) formatBytes((storage.totalBytes - storage.availableBytes).coerceAtLeast(0)) else "unavailable"
+    val runtime = Runtime.getRuntime()
+    val heapUsed = runtime.totalMemory() - runtime.freeMemory()
+    val securityPatch = if (Build.VERSION.SDK_INT >= 23) Build.VERSION.SECURITY_PATCH else "unavailable"
+    return """DEVICE       ${Build.MANUFACTURER} ${Build.MODEL}
+BRAND        ${Build.BRAND}
+CODENAME     ${Build.DEVICE}
+PRODUCT      ${Build.PRODUCT}
+BOARD        ${Build.BOARD}
+HARDWARE     ${Build.HARDWARE}
+BOOTLOADER   ${Build.BOOTLOADER}
+ANDROID      ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}, ${Build.VERSION.SDK})
+SECURITY     $securityPatch
+BUILD        ${Build.DISPLAY}
+FINGERPRINT  ${Build.FINGERPRINT}
+CPU CORES    ${runtime.availableProcessors()}
+CPU ABIS     ${Build.SUPPORTED_ABIS.joinToString().ifEmpty { System.getProperty("os.arch", "unknown") }}
+LOAD AVG     ${runCatching { File("/proc/loadavg").readText().substringBefore(' ') }.getOrNull() ?: "unavailable"}
+RAM          $ramUsed used / $ramTotal total ($ramAvailable available)
+LOW RAM      ${ram?.lowMemory?.toString() ?: "unavailable"}
+STORAGE      $storageUsed used / $storageTotal total ($storageAvailable available)
+${batteryInfo(ctx)}
+UPTIME       ${deviceUptime()}
+APP HEAP     ${formatBytes(heapUsed)} used / ${formatBytes(runtime.maxMemory())} max
+DISPLAY      $resolution @ $refreshRate
+KERNEL       ${System.getProperty("os.version", "unknown")}
+JVM          ${System.getProperty("java.vm.name", "unknown")} ${System.getProperty("java.vm.version", "")}"""
 }
 
 private fun batteryInfo(ctx: Context): String {
@@ -422,7 +476,7 @@ private fun clipboardCommand(ctx: Context, argument: String): String {
         }
         return "Clipboard cleared."
     }
-    if (argument.isNotBlank()) return "Usage: /clip [clear]"
+    if (argument.isNotBlank()) return "Usage: clip [clear]"
     val clip = clipboard.primaryClip ?: return "Clipboard is empty or unavailable."
     val text = (0 until clip.itemCount)
         .mapNotNull { clip.getItemAt(it).text?.toString() }
@@ -430,32 +484,6 @@ private fun clipboardCommand(ctx: Context, argument: String): String {
     if (text.isEmpty()) return "Clipboard has no plain-text content."
     val maxChars = 1_200
     return if (text.length > maxChars) text.take(maxChars) + "… [truncated]" else text
-}
-
-private fun dndCommand(ctx: Context, argument: String): String {
-    if (argument.isNotBlank()) {
-        val minutes = argument.toIntOrNull()
-        if (minutes == null || minutes !in 1..1_440) return "Usage: /dnd [minutes] (1–1440)"
-        return "Timed DND can't be safely scheduled here. Use Android Quick Settings to choose a duration."
-    }
-
-    val notificationManager = ctx.getSystemService(NotificationManager::class.java)
-        ?: return "Do Not Disturb service is unavailable."
-    if (!notificationManager.isNotificationPolicyAccessGranted) {
-        return try {
-            ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
-            "Grant Aneonyx notification-policy access, then run /dnd again."
-        } catch (_: Exception) {
-            "Couldn't open notification-policy settings. Open them from Android Settings."
-        }
-    }
-
-    val currentlyAll = notificationManager.currentInterruptionFilter ==
-        NotificationManager.INTERRUPTION_FILTER_ALL
-    val target = if (currentlyAll) NotificationManager.INTERRUPTION_FILTER_NONE
-    else NotificationManager.INTERRUPTION_FILTER_ALL
-    notificationManager.setInterruptionFilter(target)
-    return if (currentlyAll) "Do Not Disturb enabled." else "Do Not Disturb disabled."
 }
 
 private fun fileRoot(): File = Environment.getExternalStorageDirectory().canonicalFile
@@ -473,21 +501,59 @@ private fun resolveExplorerPath(currentPath: String, requested: String): File {
     return candidate
 }
 
-private fun listDirectory(path: File): String {
+private fun listDirectoryPage(path: File, page: Int): String {
     if (!path.exists() || !path.isDirectory) return "Directory not found: ${path.path}"
-    val entries = path.listFiles() ?: return "Directory unreadable: ${path.path}"
-    if (entries.isEmpty()) return "(empty directory)\n${path.path}"
-    val shown = entries.take(MAX_LISTING_ENTRIES)
-        .sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase(Locale.ROOT) }))
-    val lines = shown.map { file -> "${if (file.isDirectory) "[DIR]" else "[FILE]"} ${file.name}" }
-    val suffix = if (entries.size > shown.size) "\n… ${entries.size - shown.size} more entries omitted" else ""
-    return "${path.path}\n${lines.joinToString("\n")}$suffix"
+    val offset = (page.toLong() - 1L) * MAX_DIRECTORY_PAGE_SIZE
+    val entries = ArrayList<File>(MAX_DIRECTORY_PAGE_SIZE + 1)
+    if (Build.VERSION.SDK_INT >= 26) {
+        Files.list(path.toPath()).use { stream ->
+            val iterator = stream.skip(offset).iterator()
+            while (entries.size <= MAX_DIRECTORY_PAGE_SIZE && iterator.hasNext()) {
+                entries.add(iterator.next().toFile())
+            }
+        }
+    } else {
+        val allNames = path.list() ?: return "Directory unreadable: ${path.path}"
+        val start = offset.coerceAtMost(allNames.size.toLong()).toInt()
+        val end = (start.toLong() + MAX_DIRECTORY_PAGE_SIZE + 1).coerceAtMost(allNames.size.toLong()).toInt()
+        for (index in start until end) entries.add(File(path, allNames[index]))
+    }
+    if (entries.isEmpty()) {
+        return if (page == 1) "(empty directory)\n${path.path}" else "No entries on page $page.\n${path.path}"
+    }
+    val hasNextPage = entries.size > MAX_DIRECTORY_PAGE_SIZE
+    if (hasNextPage) entries.removeAt(MAX_DIRECTORY_PAGE_SIZE)
+    return buildString {
+        append(path.path).append(" • page ").append(page).append('\n')
+        entries.forEachIndexed { index, file ->
+            if (index > 0) append('\n')
+            append(if (file.isDirectory) "[DIR] " else "[FILE] ").append(file.name)
+        }
+        if (hasNextPage) append("\nNext: ls --page ").append(page + 1).append(' ').append(path.path)
+        else append("\nEnd of directory.")
+    }
+}
+
+private fun clearCacheDirectoryContents(directory: File?): Pair<Int, Int> {
+    if (directory == null || !directory.isDirectory) return 0 to 0
+    var removedEntries = 0
+    var failedEntries = 0
+    directory.listFiles().orEmpty().forEach { entry ->
+        if (entry.deleteRecursively()) removedEntries++ else failedEntries++
+    }
+    return removedEntries to failedEntries
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> "%.1f MiB".format(Locale.ROOT, bytes / (1024f * 1024f))
+    bytes >= 1024L -> "%.1f KiB".format(Locale.ROOT, bytes / 1024f)
+    else -> "$bytes B"
 }
 
 private fun readTextPreview(path: File): String {
     if (!path.exists() || !path.isFile) return "File not found: ${path.path}"
     if (!path.canRead()) return "File unreadable: ${path.name}"
-    if (path.length() > MAX_TEXT_FILE_BYTES) return "File too large; /cat is limited to 1 MiB."
+    if (path.length() > MAX_TEXT_FILE_BYTES) return "File too large; cat is limited to 1 MiB."
     return try {
         val output = ArrayList<String>(20)
         BufferedReader(InputStreamReader(path.inputStream(), Charsets.UTF_8)).use { reader ->
@@ -556,31 +622,45 @@ private suspend fun executeLocalCommand(
     ctx: Context,
     input: String,
     apps: List<AppEntry>,
+    favoriteKeys: Set<String>,
+    hiddenKeys: Set<String>,
+    currentThemeName: String,
     currentPath: String,
     history: List<String>,
 ): CommandResult {
     if (input.length > MAX_COMMAND_INPUT_CHARS) {
         return CommandResult("Command is too long (maximum $MAX_COMMAND_INPUT_CHARS characters).", false)
     }
-    val command = input.trim().removePrefix("/").trim()
+    val command = input.trim().removePrefix("/").trimStart('/').trim()
     val name = command.substringBefore(' ').lowercase(Locale.ROOT)
     val argument = command.substringAfter(' ', "").trim()
     return try {
         when (name) {
-            "clear" -> if (argument.isNotEmpty()) CommandResult("Usage: /clear", false)
+            "exit" -> if (argument.isNotEmpty()) CommandResult("Usage: exit", false)
+                else CommandResult("", exitCli = true)
+            "clear" -> if (argument.isNotEmpty()) CommandResult("Usage: clear", false)
                 else CommandResult("", clearOutput = true)
             "free" -> {
-                if (argument.isNotEmpty()) CommandResult("Usage: /$name", false)
-                else {
-                    val runtime = Runtime.getRuntime()
-                    val usedMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
-                    val maxMb = runtime.maxMemory() / (1024 * 1024)
-                    CommandResult("Aneonyx heap: ${usedMb} MiB used / ${maxMb} MiB max. Android manages garbage collection automatically.")
+                if (argument.isNotEmpty()) CommandResult("Usage: $name", false)
+                else withContext(Dispatchers.IO) {
+                    val cacheResults = listOf(ctx.cacheDir, ctx.externalCacheDir)
+                        .distinctBy { it?.absolutePath }
+                        .map { clearCacheDirectoryContents(it) }
+                    val removedEntries = cacheResults.sumOf { it.first }
+                    val failedEntries = cacheResults.sumOf { it.second }
+                    val failureText = if (failedEntries == 0) "" else " $failedEntries cache item(s) could not be removed."
+                    CommandResult(
+                        "Removed $removedEntries Aneonyx cache item(s) and released the wallpaper bitmap. Android reclaims heap memory as needed; other apps' RAM and caches are managed by Android.",
+                        releaseWallpaper = true,
+                    ).let { result ->
+                        if (failureText.isEmpty()) result else result.copy(output = result.output + failureText)
+                    }
                 }
             }
             "apps" -> {
                 val normalized = argument.lowercase(Locale.ROOT)
                 val matches = apps.asSequence()
+                    .filterNot { it.key in hiddenKeys }
                     .filter { normalized.isBlank() || it.searchLabel.contains(normalized) || it.packageName.contains(normalized, ignoreCase = true) }
                     .take(101)
                     .toList()
@@ -591,52 +671,106 @@ private suspend fun executeLocalCommand(
                     CommandResult("${matches.size.coerceAtMost(100)} app(s) shown:\n$shown$suffix")
                 }
             }
-            "refresh" -> if (argument.isNotEmpty()) CommandResult("Usage: /refresh", false)
+            "favorites" -> if (argument.isNotEmpty()) CommandResult("Usage: favorites", false) else {
+                val pinned = apps.filter { it.key in favoriteKeys && it.key !in hiddenKeys }
+                CommandResult(pinned.joinToString("\n") { "${it.label} (${it.packageName})" }.ifEmpty { "No pinned apps yet." })
+            }
+            "pin", "unpin" -> {
+                val app = findAppMatch(apps.filterNot { it.key in hiddenKeys }, argument)
+                when {
+                    argument.isBlank() -> CommandResult("Usage: $name <app name or package>", false)
+                    app == null -> CommandResult("No matching launcher app found.", false)
+                    name == "pin" && app.key in favoriteKeys -> CommandResult("${app.label} is already pinned.")
+                    name == "unpin" && app.key !in favoriteKeys -> CommandResult("${app.label} is not pinned.", false)
+                    else -> {
+                        val updated = favoriteKeys.toMutableSet().apply {
+                            if (name == "pin") add(app.key) else remove(app.key)
+                        }.toSet()
+                        CommandResult("${app.label} ${if (name == "pin") "pinned" else "unpinned"}.", newFavoriteKeys = updated)
+                    }
+                }
+            }
+            "hide", "unhide" -> {
+                val app = findAppMatch(apps, argument)
+                when {
+                    argument.isBlank() -> CommandResult("Usage: $name <app name or package>", false)
+                    app == null -> CommandResult("No matching launcher app found.", false)
+                    name == "hide" && app.key in hiddenKeys -> CommandResult("${app.label} is already hidden.")
+                    name == "unhide" && app.key !in hiddenKeys -> CommandResult("${app.label} is not hidden.", false)
+                    else -> {
+                        val updated = hiddenKeys.toMutableSet().apply {
+                            if (name == "hide") add(app.key) else remove(app.key)
+                        }.toSet()
+                        CommandResult("${app.label} ${if (name == "hide") "hidden" else "unhidden"}.", newHiddenAppKeys = updated)
+                    }
+                }
+            }
+            "theme" -> {
+                val available = ACCENT_THEMES.joinToString(", ") { it.name }
+                when {
+                    argument.isBlank() || argument.equals("list", ignoreCase = true) ->
+                        CommandResult("Current theme: $currentThemeName\nAvailable themes: $available")
+                    else -> {
+                        val selected = ACCENT_THEMES.firstOrNull { it.name.equals(argument, ignoreCase = true) }
+                        if (selected == null) CommandResult("Unknown theme. Choose one of: $available", false)
+                        else CommandResult("Theme changed to ${selected.name}.", newThemeName = selected.name)
+                    }
+                }
+            }
+            "refresh" -> if (argument.isNotEmpty()) CommandResult("Usage: refresh", false)
                 else CommandResult("Refreshing launchable apps from Android.", refreshApps = true)
-            "battery" -> if (argument.isNotEmpty()) CommandResult("Usage: /battery", false)
+            "battery" -> if (argument.isNotEmpty()) CommandResult("Usage: battery", false)
                 else CommandResult(batteryInfo(ctx))
-            "uptime" -> if (argument.isNotEmpty()) CommandResult("Usage: /uptime", false)
+            "uptime" -> if (argument.isNotEmpty()) CommandResult("Usage: uptime", false)
                 else CommandResult("Device uptime: ${deviceUptime()}")
-            "version" -> if (argument.isNotEmpty()) CommandResult("Usage: /version", false)
+            "version" -> if (argument.isNotEmpty()) CommandResult("Usage: version", false)
                 else CommandResult(appVersion(ctx))
-            "time" -> if (argument.isNotEmpty()) CommandResult("Usage: /time", false)
+            "time" -> if (argument.isNotEmpty()) CommandResult("Usage: time", false)
                 else CommandResult(SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()))
-            "help" -> if (argument.isNotEmpty()) CommandResult("Usage: /help", false) else CommandResult(COMMAND_HELP)
-            "sysinfo" -> if (argument.isNotEmpty()) CommandResult("Usage: /sysinfo", false) else CommandResult(deviceInfo(ctx))
+            "help" -> if (argument.isNotEmpty()) CommandResult("Usage: help", false) else CommandResult(COMMAND_HELP)
+            "sysinfo" -> if (argument.isNotEmpty()) CommandResult("Usage: sysinfo", false) else
+                withContext(Dispatchers.IO) { CommandResult(systemInfo(ctx)) }
             "pkg" -> {
                 val app = findAppMatch(apps, argument)
                 when {
-                    argument.isBlank() -> CommandResult("Usage: /pkg <app name or package>", false)
+                    argument.isBlank() -> CommandResult("Usage: pkg <app name or package>", false)
                     app == null -> CommandResult("No matching launcher app found.", false)
                     openAppInfo(ctx, app.packageName) -> CommandResult("Opening App Info: ${app.label} (${app.packageName})")
                     else -> CommandResult("Couldn't open App Info for ${app.packageName}.", false)
                 }
             }
             "clip" -> CommandResult(clipboardCommand(ctx, argument), success = argument.isBlank() || argument.equals("clear", true))
-            "dnd" -> CommandResult(
-                dndCommand(ctx, argument),
-                success = argument.isBlank() && runCatching {
-                    (ctx.getSystemService(NotificationManager::class.java))?.isNotificationPolicyAccessGranted == true
-                }.getOrDefault(false),
-            )
             "ls" -> {
+                val pageMatch = if (argument.startsWith("--page")) lsPagePattern.matchEntire(argument) else null
+                val page = when {
+                    argument.startsWith("--page") && pageMatch == null -> 0
+                    pageMatch != null -> pageMatch.groupValues[1].toIntOrNull()?.takeIf { it > 0 } ?: 0
+                    else -> 1
+                }
+                if (page == 0) return CommandResult("Usage: ls [--page <number>] [subfolder]", false)
+                val subfolder = pageMatch?.groupValues?.getOrNull(2).orEmpty().ifEmpty {
+                    if (pageMatch == null) argument else ""
+                }
                 withContext(Dispatchers.IO) {
                     runCatching {
-                        val directory = resolveExplorerPath(currentPath, argument)
-                        CommandResult(listDirectory(directory), success = directory.isDirectory && directory.canRead())
+                        val directory = resolveExplorerPath(currentPath, subfolder)
+                        CommandResult(
+                            listDirectoryPage(directory, page),
+                            success = directory.isDirectory && directory.canRead(),
+                        )
                     }.getOrElse { CommandResult(it.message ?: "Directory unreadable", false) }
                 }
             }
-            "pwd" -> if (argument.isNotEmpty()) CommandResult("Usage: /pwd", false) else CommandResult(currentPath)
+            "pwd" -> if (argument.isNotEmpty()) CommandResult("Usage: pwd", false) else CommandResult(currentPath)
             "mkdir", "rmdir", "rm" -> {
-                if (argument.isBlank()) CommandResult("Usage: /$name <path>", false)
+                if (argument.isBlank()) CommandResult("Usage: $name <path>", false)
                 else if (name != "mkdir" && !argument.startsWith("--confirm ")) {
-                    CommandResult("Deletion changes shared storage. Repeat as /$name --confirm <path> to continue.", false)
+                    CommandResult("Deletion changes shared storage. Repeat as $name --confirm <path> to continue.", false)
                 }
                 else withContext(Dispatchers.IO) {
                     runCatching {
                         val requestedPath = if (name == "mkdir") argument else argument.removePrefix("--confirm ").trim()
-                        require(requestedPath.isNotBlank()) { "Usage: /$name --confirm <path>" }
+                        require(requestedPath.isNotBlank()) { "Usage: $name --confirm <path>" }
                         val target = resolveExplorerPath(currentPath, requestedPath)
                         require(target != fileRoot()) { "The shared storage root cannot be removed." }
                         when (name) {
@@ -651,60 +785,105 @@ private suspend fun executeLocalCommand(
                 }
             }
             "find" -> {
-                if (argument.isBlank()) CommandResult("Usage: /find <query>", false)
+                if (argument.isBlank()) CommandResult("Usage: find <query>", false)
                 else withContext(Dispatchers.IO) {
                     runCatching {
                         val base = resolveExplorerPath(currentPath, "")
-                        val visited = base.walkTopDown().maxDepth(12).take(MAX_FIND_ENTRIES + 1).toList()
-                        val matches = visited.asSequence()
-                            .filter { it.isDirectory && it.name.contains(argument, true) }
-                            .take(100)
-                            .map { it.path }
-                            .toList()
-                        val output = (if (matches.isEmpty()) "No matching folders." else matches.joinToString("\n")) +
-                            if (visited.size > MAX_FIND_ENTRIES) "\nSearch stopped after $MAX_FIND_ENTRIES entries." else ""
-                        CommandResult(output)
+                        val output = StringBuilder()
+                        var visited = 0
+                        var shown = 0
+                        var stopped = false
+                        var outputTruncated = false
+                        var moreMatches = false
+                        for (entry in base.walkTopDown().maxDepth(12)) {
+                            if (visited == MAX_FIND_ENTRIES) {
+                                stopped = true
+                                break
+                            }
+                            visited++
+                            if (entry.isDirectory && entry.name.contains(argument, ignoreCase = true)) {
+                                if (shown == 100) {
+                                    moreMatches = true
+                                    continue
+                                }
+                                val path = entry.path
+                                if (output.length + path.length + 1 > MAX_TERMINAL_OUTPUT_CHARS) {
+                                    outputTruncated = true
+                                    continue
+                                }
+                                if (output.isNotEmpty()) output.append('\n')
+                                output.append(path)
+                                shown++
+                            }
+                        }
+                        if (shown == 0) output.append("No matching folders.")
+                        if (stopped) output.append("\nSearch stopped after $MAX_FIND_ENTRIES entries.")
+                        if (outputTruncated) output.append("\nSome matching paths omitted to limit output size.")
+                        else if (moreMatches) output.append("\nAdditional matches omitted after 100 results.")
+                        CommandResult(output.toString())
                     }.getOrElse { CommandResult(it.message ?: "Search failed.", false) }
                 }
             }
             "grep" -> {
                 val pattern = argument.substringBefore(' ')
                 val fileArg = argument.substringAfter(' ', "").trim()
-                if (pattern.isBlank() || fileArg.isBlank()) CommandResult("Usage: /grep <pattern> <file>", false)
+                if (pattern.isBlank() || fileArg.isBlank()) CommandResult("Usage: grep <pattern> <file>", false)
                 else withContext(Dispatchers.IO) {
                     runCatching {
                         val file = resolveExplorerPath(currentPath, fileArg)
                         require(file.isFile && file.canRead()) { "File not readable: ${file.path}" }
                         require(file.length() <= MAX_TEXT_FILE_BYTES) { "File too large; limit is 1 MiB." }
-                        val matches = file.readLines().take(20_000).mapIndexedNotNull { i, line -> if (line.contains(pattern, true)) "${i + 1}: $line" else null }
-                        CommandResult(matches.take(200).joinToString("\n").ifEmpty { "No matches." })
+                        val output = StringBuilder()
+                        var lineNumber = 0
+                        var matchCount = 0
+                        var outputTruncated = false
+                        BufferedReader(InputStreamReader(file.inputStream(), Charsets.UTF_8)).use { reader ->
+                            while (lineNumber < MAX_GREP_LINES && matchCount < MAX_GREP_MATCHES) {
+                                val line = reader.readLine() ?: break
+                                lineNumber++
+                                if (!line.contains(pattern, ignoreCase = true)) continue
+                                val prefix = "$lineNumber: "
+                                val shownLine = line.take(MAX_GREP_LINE_CHARS)
+                                val lineSuffix = if (shownLine.length < line.length) "…" else ""
+                                if (output.length + prefix.length + shownLine.length + lineSuffix.length + 1 > MAX_TERMINAL_OUTPUT_CHARS - 48) {
+                                    outputTruncated = true
+                                    break
+                                }
+                                if (output.isNotEmpty()) output.append('\n')
+                                output.append(prefix).append(shownLine).append(lineSuffix)
+                                matchCount++
+                            }
+                        }
+                        if (output.isEmpty()) {
+                            output.append(if (outputTruncated) "Matching output exceeded the terminal size limit." else "No matches.")
+                        }
+                        when {
+                            outputTruncated -> output.append("\nOutput stopped at the terminal size limit.")
+                            matchCount == MAX_GREP_MATCHES -> output.append("\nStopped after $MAX_GREP_MATCHES matches.")
+                            lineNumber == MAX_GREP_LINES -> output.append("\nStopped after $MAX_GREP_LINES lines.")
+                        }
+                        CommandResult(output.toString())
                     }.getOrElse { CommandResult(it.message ?: "Search failed.", false) }
                 }
             }
-            "calc" -> if (argument.isBlank()) CommandResult("Usage: /calc <expression>", false) else
+            "calc" -> if (argument.isBlank()) CommandResult("Usage: calc <expression>", false) else
                 runCatching { CommandResult(ArithmeticParser(argument).parse().toString()) }
                     .getOrElse { CommandResult(it.message ?: "Invalid expression.", false) }
-            "ps" -> if (argument.isNotBlank()) CommandResult("Usage: /ps", false) else {
+            "ps" -> if (argument.isNotBlank()) CommandResult("Usage: ps", false) else {
                 val am = ctx.getSystemService(ActivityManager::class.java)
                 @Suppress("DEPRECATION")
                 val processes = am?.runningAppProcesses.orEmpty()
                 CommandResult(processes.joinToString("\n") { "${it.processName} (pid ${it.pid})" }.ifEmpty { "No app processes are visible to this launcher." })
             }
-            "kill" -> {
-                val app = findAppMatch(apps, argument)
-                if (app == null) CommandResult("Usage: /kill <app> — Android blocks launchers from force-stopping other apps.", false)
-                else CommandResult("Android blocks force-stopping other apps from a launcher. Open App Info to stop ${app.label}.", false,
-                    newPath = null).also { openAppInfo(ctx, app.packageName) }
-            }
             "open" -> {
                 val app = findAppMatch(apps, argument)
-                if (argument.isBlank()) CommandResult("Usage: /open <app>", false)
+                if (argument.isBlank()) CommandResult("Usage: open <app>", false)
                 else if (app == null) CommandResult("No matching launcher app found.", false)
                 else { launchApp(ctx, app); CommandResult("Opening ${app.label}.") }
             }
             "uninstall" -> {
                 val app = findAppMatch(apps, argument)
-                if (argument.isBlank()) CommandResult("Usage: /uninstall <app>", false)
+                if (argument.isBlank()) CommandResult("Usage: uninstall <app>", false)
                 else if (app == null) CommandResult("No matching launcher app found.", false)
                 else {
                     val intent = Intent(Intent.ACTION_DELETE, Uri.fromParts("package", app.packageName, null)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -712,7 +891,7 @@ private suspend fun executeLocalCommand(
                 }
             }
             "cd" -> {
-                if (argument.isBlank()) CommandResult("Usage: /cd <directory>", false)
+                if (argument.isBlank()) CommandResult("Usage: cd <directory>", false)
                 else withContext(Dispatchers.IO) {
                     runCatching {
                         if (argument == ".." && File(currentPath).canonicalFile == fileRoot()) {
@@ -726,7 +905,7 @@ private suspend fun executeLocalCommand(
                 }
             }
             "cat" -> {
-                if (argument.isBlank()) CommandResult("Usage: /cat <filename>", false)
+                if (argument.isBlank()) CommandResult("Usage: cat <filename>", false)
                 else withContext(Dispatchers.IO) {
                     runCatching {
                         val file = resolveExplorerPath(currentPath, argument)
@@ -737,16 +916,16 @@ private suspend fun executeLocalCommand(
             }
             "history" -> when {
                 argument.equals("clear", ignoreCase = true) -> CommandResult("Command history cleared.", clearHistory = true)
-                argument.isNotEmpty() -> CommandResult("Usage: /history [clear]", false)
+                argument.isNotEmpty() -> CommandResult("Usage: history [clear]", false)
                 history.isEmpty() -> CommandResult("No command history yet.")
                 else -> CommandResult(history.mapIndexed { index, item -> "${index + 1}. $item" }.joinToString("\n"))
             }
             "layout" -> when (argument.lowercase(Locale.ROOT)) {
                 "grid" -> CommandResult("App drawer layout set to grid.", newGridLayout = true)
                 "list" -> CommandResult("App drawer layout set to list.", newGridLayout = false)
-                else -> CommandResult("Usage: /layout grid|list", false)
+                else -> CommandResult("Usage: layout grid|list", false)
             }
-            else -> CommandResult("Unknown command. Type /help", false)
+            else -> CommandResult("Unknown command. Type help", false)
         }
     } catch (cancelled: CancellationException) {
         throw cancelled
@@ -788,7 +967,8 @@ private fun readStats(
 ): Stats {
     // RAM
     val am = ctx.getSystemService(ActivityManager::class.java)
-    val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+    val mi = ActivityManager.MemoryInfo()
+    am?.getMemoryInfo(mi)
     val totalMb = mi.totalMem / (1024 * 1024)
     val usedMb = (mi.totalMem - mi.availMem) / (1024 * 1024)
     val ramPct = if (totalMb > 0) (usedMb * 100 / totalMb).toInt() else 0
@@ -878,13 +1058,24 @@ private fun loadColor(pct: Int) = when {
     else -> GREEN
 }
 
+private fun deviceDisplayName(ctx: Context): String {
+    val configuredName = if (Build.VERSION.SDK_INT >= 25) {
+        runCatching { Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME) }
+            .getOrNull().orEmpty()
+    } else ""
+    return configuredName.trim().replace(Regex("\\s+"), " ")
+        .ifBlank { Build.MODEL.trim().ifBlank { "Android device" } }
+}
+
 @Composable
 private fun TelemetryBanner(
     lifecycleOwner: LifecycleOwner,
     refreshSignal: Int,
     onRefreshStats: () -> Unit,
 ) {
+    val accent = LocalAccent.current
     val ctx = LocalContext.current.applicationContext
+    val deviceName = remember(ctx) { deviceDisplayName(ctx) }
     var stats by remember { mutableStateOf<Stats?>(null) }
     var expanded by rememberSaveable { mutableStateOf(false) }
     var refreshFeedback by remember { mutableStateOf(false) }
@@ -930,19 +1121,12 @@ private fun TelemetryBanner(
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            BasicText("◈", style = Mono.copy(color = CYAN, fontSize = 15.sp))
-            Spacer(Modifier.width(8.dp))
             BasicText(
-                "SYSTEM",
-                style = Mono.copy(color = GREEN),
+                deviceName,
+                style = Mono.copy(color = accent),
                 modifier = Modifier.weight(1f),
             )
-            BasicText(
-                if (expanded) "● LIVE" else "○ IDLE",
-                style = Mono.copy(color = if (expanded) GREEN else DIM, fontSize = 10.sp),
-            )
-            Spacer(Modifier.width(10.dp))
-            BasicText(if (expanded) "[−]" else "[+]", style = Mono.copy(color = CYAN))
+            BasicText(if (expanded) "[−]" else "[+]", style = Mono.copy(color = accent))
         }
 
         if (!expanded) {
@@ -951,7 +1135,7 @@ private fun TelemetryBanner(
 
         Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp)) {
             BasicText(
-                "┌─ INFO ──────────────────────────────",
+                "┌─ SYSTEM ─────────────────────────────",
                 style = Mono.copy(color = DIM, fontSize = 10.sp),
             )
             val s = stats
@@ -1001,7 +1185,7 @@ private fun TelemetryBanner(
             )
             BasicText(
                 "NET ↓IN ${formatRate(s.rxBytesPerSec)} ↑OUT ${formatRate(s.txBytesPerSec)}",
-                style = Mono.copy(color = CYAN),
+                style = Mono.copy(color = accent),
             )
         }
     }
@@ -1017,8 +1201,28 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     val focus = LocalFocusManager.current
     val haptics = LocalHapticFeedback.current
     val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
-    val prompt = remember(ctx) { readPromptIdentity(ctx) }
+    val adminComponent = remember(ctx) { ComponentName(ctx, AneonyxDeviceAdminReceiver::class.java) }
+    val devicePolicyManager = remember(ctx) { ctx.getSystemService(DevicePolicyManager::class.java) }
+    val adminActivation = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (devicePolicyManager?.isAdminActive(adminComponent) == true) {
+            runCatching { devicePolicyManager.lockNow() }
+        }
+    }
+    val lockDevice = {
+        if (devicePolicyManager?.isAdminActive(adminComponent) == true) {
+            runCatching { devicePolicyManager.lockNow() }
+        } else {
+            val request = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                .putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
+                .putExtra(
+                    DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                    "Aneonyx uses device administrator access only to lock the screen when you double-tap the launcher background.",
+                )
+            runCatching { adminActivation.launch(request) }
+        }
+    }
     var wallpaper by remember(ctx) { mutableStateOf<ImageBitmap?>(null) }
+    var wallpaperReloadSignal by remember { mutableIntStateOf(0) }
     var statsRefreshSignal by remember { mutableIntStateOf(0) }
 
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
@@ -1029,6 +1233,17 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     val gridState = rememberLazyGridState()
     val preferences = remember(ctx) { ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
     var currentPath by rememberSaveable { mutableStateOf(Environment.getExternalStorageDirectory().absolutePath) }
+    var favoriteKeys by remember(ctx) {
+        mutableStateOf(preferences.getString(PREF_FAVORITE_APPS, "").orEmpty().split('\n').filter { it.isNotBlank() }.toSet())
+    }
+    var hiddenKeys by remember(ctx) {
+        mutableStateOf(preferences.getString(PREF_HIDDEN_APPS, "").orEmpty().split('\n').filter { it.isNotBlank() }.toSet())
+    }
+    var selectedThemeName by remember(ctx) {
+        mutableStateOf(accentTheme(preferences.getString(PREF_ACCENT_THEME, "green").orEmpty()).name)
+    }
+    var showHiddenApps by remember { mutableStateOf(false) }
+    var actionMenuApp by remember { mutableStateOf<AppEntry?>(null) }
     var commandHistory by remember(ctx) {
         mutableStateOf<List<String>>(
             preferences.getString(PREF_COMMAND_HISTORY, "").orEmpty()
@@ -1046,14 +1261,17 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     }
 
     // Decode and rasterize the wallpaper away from the UI thread.
-    LaunchedEffect(ctx) {
+    LaunchedEffect(ctx, wallpaperReloadSignal) {
         wallpaper = withContext(Dispatchers.IO) { loadWallpaper(ctx) }
     }
 
     // Keep the list fresh when apps are installed / updated / removed.
     DisposableEffect(ctx) {
         val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) { reloadTick++ }
+            override fun onReceive(context: Context?, intent: Intent?) {
+                appIconCache.evictAll()
+                reloadTick++
+            }
         }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
@@ -1083,29 +1301,51 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
     }
 
     val commandMode = query.trimStart().startsWith("/")
-    val filtered = remember(apps, query, commandMode) {
+    val filtered = remember(apps, query, commandMode, hiddenKeys, showHiddenApps) {
         val q = query.trim().lowercase(Locale.ROOT)
         when {
             commandMode -> emptyList()
-            q.isEmpty() -> apps
-            else -> apps.filter { it.searchLabel.contains(q) }
+            else -> apps.asSequence()
+                .filter { (it.key in hiddenKeys) == showHiddenApps }
+                .filter { q.isEmpty() || it.searchLabel.contains(q) }
+                .toList()
         }
     }
-    val appSections = remember(filtered) {
-        filtered.groupBy { app -> app.label.firstOrNull()?.uppercaseChar()?.takeIf { it in 'A'..'Z' } ?: '#' }
+    val favoriteApps = remember(filtered, favoriteKeys, showHiddenApps) {
+        if (showHiddenApps) emptyList() else filtered.filter { it.key in favoriteKeys }
+    }
+    val regularApps = remember(filtered, favoriteKeys, showHiddenApps) {
+        if (showHiddenApps) filtered else filtered.filterNot { it.key in favoriteKeys }
+    }
+    val onFavoriteToggle: (AppEntry) -> Unit = { app ->
+        val updated = favoriteKeys.toMutableSet().apply {
+            if (!add(app.key)) remove(app.key)
+        }
+        favoriteKeys = updated
+        preferences.edit().putString(PREF_FAVORITE_APPS, updated.sorted().joinToString("\n")).apply()
+    }
+    val onHiddenToggle: (AppEntry) -> Unit = { app ->
+        val updated = hiddenKeys.toMutableSet().apply {
+            if (!add(app.key)) remove(app.key)
+        }
+        hiddenKeys = updated
+        preferences.edit().putString(PREF_HIDDEN_APPS, updated.sorted().joinToString("\n")).apply()
+    }
+    val appSections = remember(regularApps) {
+        regularApps.groupBy { app -> app.label.firstOrNull()?.uppercaseChar()?.takeIf { it in 'A'..'Z' } ?: '#' }
             .toList()
     }
     val availableLetters = remember(appSections) { appSections.map { it.first } }
     val sectionStarts = remember(appSections) {
         buildList {
-            var start = 0
+            var start = if (favoriteApps.isEmpty()) 0 else favoriteApps.size + 1
             appSections.forEach { (letter, entries) ->
                 add(letter to start)
                 start += entries.size + 1 // one sticky letter heading per section
             }
         }
     }
-    val currentLetter by remember(filtered, listState, gridState, isGridLayout) {
+    val currentLetter by remember(filtered, sectionStarts, listState, gridState, isGridLayout) {
         derivedStateOf {
             val visibleIndex = if (isGridLayout) gridState.firstVisibleItemIndex else listState.firstVisibleItemIndex
             sectionStarts.lastOrNull { it.second <= visibleIndex }?.first
@@ -1113,6 +1353,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
         }
     }
 
+    CompositionLocalProvider(LocalAccent provides accentTheme(selectedThemeName).color) {
     androidx.compose.foundation.layout.Box(Modifier.fillMaxSize()) {
         wallpaper?.let {
             Image(
@@ -1122,6 +1363,11 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                 modifier = Modifier.fillMaxSize().blur(28.dp),
             )
         }
+        Spacer(
+            Modifier.fillMaxSize().pointerInput(Unit) {
+                detectTapGestures(onDoubleTap = { lockDevice() })
+            },
+        )
         Column(
         Modifier
             .fillMaxSize()
@@ -1139,19 +1385,11 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
         )
         Spacer(Modifier.height(16.dp))
 
-        BasicText(
-            buildAnnotatedString {
-                withStyle(SpanStyle(color = TEXT)) { append("┌──") }
-                withStyle(SpanStyle(color = GREEN)) { append(prompt.username) }
-                withStyle(SpanStyle(color = DIM)) { append("@${prompt.deviceName} in ") }
-                withStyle(SpanStyle(color = CYAN)) { append("Aneonyx") }
-            },
-            style = Mono.copy(fontSize = 14.sp),
-        )
-
         SearchField(
             query = query,
             commandMode = commandMode,
+            currentPath = currentPath,
+            appCount = filtered.size,
             onQueryChange = {
                 query = it
             },
@@ -1163,11 +1401,27 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                             ctx = ctx,
                             input = entered,
                             apps = apps,
+                            favoriteKeys = favoriteKeys,
+                            hiddenKeys = hiddenKeys,
+                            currentThemeName = selectedThemeName,
                             currentPath = currentPath,
                             history = commandHistory,
                         )
                         if (result.refreshApps) reloadTick++
                         result.newPath?.let { currentPath = it }
+                        if (result.releaseWallpaper) wallpaper = null
+                        result.newFavoriteKeys?.let { updated ->
+                            favoriteKeys = updated
+                            preferences.edit().putString(PREF_FAVORITE_APPS, updated.sorted().joinToString("\n")).apply()
+                        }
+                        result.newHiddenAppKeys?.let { updated ->
+                            hiddenKeys = updated
+                            preferences.edit().putString(PREF_HIDDEN_APPS, updated.sorted().joinToString("\n")).apply()
+                        }
+                        result.newThemeName?.let { selected ->
+                            selectedThemeName = selected
+                            preferences.edit().putString(PREF_ACCENT_THEME, selected).apply()
+                        }
                         result.newGridLayout?.let { grid ->
                             isGridLayout = grid
                             preferences.edit().putBoolean(PREF_GRID_LAYOUT, grid).apply()
@@ -1180,33 +1434,50 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                             preferences.edit().putString(PREF_COMMAND_HISTORY, commandHistory.joinToString("\n")).apply()
                         }
                         if (query.trim() == entered) {
-                            query = "/"
-                            commandOutput = if (result.clearOutput) emptyList() else {
-                                val output = if (result.output.length > MAX_TERMINAL_OUTPUT_CHARS) {
-                                    result.output.take(MAX_TERMINAL_OUTPUT_CHARS) + "\n… output truncated"
-                                } else result.output
-                                (listOf(entered.take(MAX_COMMAND_INPUT_CHARS) to output.ifBlank { "(no output)" }) + commandOutput)
-                                    .take(MAX_TERMINAL_OUTPUT_ENTRIES)
+                            if (result.exitCli) {
+                                query = ""
+                                commandOutput = emptyList()
+                                if (wallpaper == null) wallpaperReloadSignal++
+                            } else {
+                                query = "/"
+                                commandOutput = when {
+                                    result.clearOutput -> emptyList()
+                                    else -> {
+                                        val output = if (result.output.length > MAX_TERMINAL_OUTPUT_CHARS) {
+                                            result.output.take(MAX_TERMINAL_OUTPUT_CHARS) + "\n… output truncated"
+                                        } else result.output
+                                        val entry = entered.take(MAX_COMMAND_INPUT_CHARS) to output.ifBlank { "(no output)" }
+                                        (listOf(entry) + commandOutput).take(MAX_TERMINAL_OUTPUT_ENTRIES)
+                                    }
+                                }
                             }
                         }
                     }
                 } else {
-                    filtered.firstOrNull()?.let { launchApp(ctx, it) }
+                    if (!showHiddenApps) filtered.firstOrNull()?.let { launchApp(ctx, it) }
                 }
             },
         )
+        if (!commandMode) {
+            BasicText(
+                text = if (showHiddenApps) "‹ BACK TO APPS" else "HIDDEN APPS (${hiddenKeys.size})",
+                style = Mono.copy(color = LocalAccent.current, fontSize = 11.sp),
+                modifier = Modifier.clickable {
+                    showHiddenApps = !showHiddenApps
+                    query = ""
+                    coroutineScope.launch {
+                        listState.scrollToItem(0)
+                        gridState.scrollToItem(0)
+                    }
+                }.padding(top = 6.dp),
+            )
+        }
         if (commandMode) {
             commandOutput.takeIf { it.isNotEmpty() }?.let { output ->
                 Box(Modifier.weight(1f).fillMaxWidth()) { TerminalOutput(output) }
             }
         } else {
             Spacer(Modifier.height(10.dp))
-            BasicText(
-                "// ${filtered.size} APPLICATIONS",
-                style = Mono.copy(color = DIM, fontSize = 10.sp),
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 if (isGridLayout) {
                     LazyVerticalGrid(
@@ -1214,6 +1485,26 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                         state = gridState,
                         modifier = Modifier.weight(1f).fillMaxHeight(),
                     ) {
+                        if (favoriteApps.isNotEmpty()) {
+                            item(key = "pinned-apps-header", span = { GridItemSpan(maxLineSpan) }) {
+                                PinnedSectionHeader()
+                            }
+                            gridItems(
+                                items = favoriteApps,
+                                key = { "pinned-${it.key}" },
+                                span = { GridItemSpan(1) },
+                                contentType = { "pinned-app-grid-cell" },
+                            ) { app ->
+                                AppGridCell(
+                                    app = app,
+                                    onClick = { launchApp(ctx, app) },
+                                    onLongClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        actionMenuApp = app
+                                    },
+                                )
+                            }
+                        }
                         appSections.forEach { (letter, sectionApps) ->
                             item(key = "section-$letter", span = { GridItemSpan(maxLineSpan) }) {
                                 AlphabetSectionHeader(letter)
@@ -1229,7 +1520,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                                     onClick = { launchApp(ctx, app) },
                                     onLongClick = {
                                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        openAppInfo(ctx, app.packageName)
+                                        actionMenuApp = app
                                     },
                                 )
                             }
@@ -1240,6 +1531,23 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                         state = listState,
                         modifier = Modifier.weight(1f).fillMaxHeight(),
                     ) {
+                        if (favoriteApps.isNotEmpty()) {
+                            item(key = "pinned-apps-header") { PinnedSectionHeader() }
+                            items(
+                                items = favoriteApps,
+                                key = { "pinned-${it.key}" },
+                                contentType = { "pinned-app-row" },
+                            ) { app ->
+                                AppRow(
+                                    app = app,
+                                    onClick = { launchApp(ctx, app) },
+                                    onLongClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        actionMenuApp = app
+                                    },
+                                )
+                            }
+                        }
                         appSections.forEach { (letter, sectionApps) ->
                             stickyHeader(key = "section-$letter") {
                                 AlphabetSectionHeader(letter)
@@ -1254,7 +1562,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                                     onClick = { launchApp(ctx, app) },
                                     onLongClick = {
                                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        openAppInfo(ctx, app.packageName)
+                                        actionMenuApp = app
                                     },
                                 )
                             }
@@ -1276,22 +1584,54 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
         }
         }
     }
+    actionMenuApp?.let { app ->
+        AppActionDialog(
+            app = app,
+            isFavorite = app.key in favoriteKeys,
+            isHidden = app.key in hiddenKeys,
+            onDismiss = { actionMenuApp = null },
+            onToggleFavorite = {
+                onFavoriteToggle(app)
+                actionMenuApp = null
+            },
+            onAppInfo = {
+                actionMenuApp = null
+                openAppInfo(ctx, app.packageName)
+            },
+            onToggleHidden = {
+                onHiddenToggle(app)
+                actionMenuApp = null
+            },
+        )
+    }
+    }
 }
 
 @Composable
 private fun AlphabetSectionHeader(letter: Char) {
+    val accent = LocalAccent.current
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Spacer(Modifier.weight(1f).height(1.dp).background(CYAN.copy(alpha = 0.65f)))
+        Spacer(Modifier.weight(1f).height(1.dp).background(accent.copy(alpha = 0.65f)))
         BasicText(
             text = letter.toString(),
-            style = Mono.copy(color = CYAN, fontSize = 11.sp),
+            style = Mono.copy(color = accent, fontSize = 11.sp),
             modifier = Modifier.padding(horizontal = 9.dp),
         )
-        Spacer(Modifier.weight(1f).height(1.dp).background(CYAN.copy(alpha = 0.65f)))
+        Spacer(Modifier.weight(1f).height(1.dp).background(accent.copy(alpha = 0.65f)))
     }
+}
+
+@Composable
+private fun PinnedSectionHeader() {
+    val accent = LocalAccent.current
+    BasicText(
+        text = "PINNED",
+        style = Mono.copy(color = accent, fontSize = 11.sp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+    )
 }
 
 @Composable
@@ -1301,6 +1641,7 @@ private fun AlphabetIndex(
     selectedLetter: Char,
     onSelect: (Char) -> Unit,
 ) {
+    val accent = LocalAccent.current
     val latestOnSelect = rememberUpdatedState(onSelect)
     val latestAvailableLetters = rememberUpdatedState(availableLetters)
     Column(
@@ -1347,7 +1688,7 @@ private fun AlphabetIndex(
                 text = letter.toString(),
                 style = Mono.copy(
                     color = when {
-                        selected -> GREEN
+                        selected -> accent
                         letter in availableLetters -> DIM
                         else -> DIM.copy(alpha = 0.28f)
                     },
@@ -1364,27 +1705,31 @@ private fun AlphabetIndex(
 
 @Composable
 private fun TerminalOutput(output: List<Pair<String, String>>) {
+    val accent = LocalAccent.current
+    val renderedResults = remember(output, accent) {
+        output.map { (_, result) -> terminalAnnotatedText(result, accent) }
+    }
+    val scrollState = rememberScrollState()
+    LaunchedEffect(output) { scrollState.scrollTo(0) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             .padding(top = 6.dp, bottom = 8.dp)
-            .border(1.dp, BORDER)
-            .background(Color(0x66101318))
             .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
-        output.forEachIndexed { index, (command, result) ->
+        output.forEachIndexed { index, (command, _) ->
             BasicText(
-                "┌─ ${if (index == 0) "LATEST" else "PREVIOUS"} COMMAND: $command ─",
-                style = Mono.copy(color = DIM, fontSize = 10.sp),
+                "\$ ${command.removePrefix("/")}",
+                style = Mono.copy(color = accent, fontSize = 12.sp),
             )
-            BasicText(terminalAnnotatedText(result), style = Mono.copy(color = CYAN, fontSize = 11.sp))
-            if (index != output.lastIndex) Spacer(Modifier.height(7.dp))
+            BasicText(renderedResults[index], style = Mono.copy(color = TEXT, fontSize = 12.sp))
+            Spacer(Modifier.height(8.dp))
         }
     }
 }
 
-private fun terminalAnnotatedText(output: String) = buildAnnotatedString {
+private fun terminalAnnotatedText(output: String, accent: Color) = buildAnnotatedString {
     var index = 0
     while (index < output.length) {
         val command = HELP_COMMAND_TOKENS.firstOrNull { token ->
@@ -1396,7 +1741,7 @@ private fun terminalAnnotatedText(output: String) = buildAnnotatedString {
             append(output[index])
             index++
         } else {
-            withStyle(SpanStyle(color = GREEN, fontWeight = FontWeight.Bold)) { append(command) }
+            withStyle(SpanStyle(color = accent, fontWeight = FontWeight.Bold)) { append(command) }
             index += command.length
         }
     }
@@ -1406,31 +1751,53 @@ private fun terminalAnnotatedText(output: String) = buildAnnotatedString {
 private fun SearchField(
     query: String,
     commandMode: Boolean,
+    currentPath: String,
+    appCount: Int,
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
 ) {
+    val accent = LocalAccent.current
     BasicTextField(
-        value = query,
-        onValueChange = onQueryChange,
+        value = if (commandMode) query.removePrefix("/") else query,
+        onValueChange = { value -> onQueryChange(if (commandMode) "/$value" else value) },
         singleLine = true,
-        textStyle = Mono.copy(color = TEXT, fontSize = 15.sp),
-        cursorBrush = SolidColor(GREEN),
+        textStyle = if (commandMode) Mono.copy(color = TEXT, fontSize = 15.sp)
+        else TextStyle(color = TEXT, fontSize = 16.sp),
+        cursorBrush = SolidColor(accent),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         keyboardActions = KeyboardActions(onSearch = { onSearch() }),
         modifier = Modifier.fillMaxWidth(),
         decorationBox = { inner ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                BasicText(
-                    text = if (commandMode) "└─CMD>" else "└──>",
-                    style = Mono.copy(color = if (commandMode) CYAN else GREEN, fontSize = 14.sp),
-                )
-                Spacer(Modifier.width(7.dp))
-                inner()
+            if (commandMode) {
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    BasicText(
+                        text = "$currentPath \$",
+                        style = Mono.copy(color = accent, fontSize = 14.sp),
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    inner()
+                }
+            } else {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, BORDER)
+                        .background(Color.Transparent)
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    BasicText("⌕", style = TextStyle(color = accent, fontSize = 20.sp))
+                    Spacer(Modifier.width(9.dp))
+                    Box(Modifier.weight(1f)) {
+                        if (query.isEmpty()) {
+                            BasicText("$appCount APPLICATIONS", style = TextStyle(color = DIM, fontSize = 16.sp))
+                        }
+                        inner()
+                    }
+                }
             }
         },
     )
@@ -1443,20 +1810,20 @@ private fun AppRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
+    val accent = LocalAccent.current
     Row(
         Modifier
             .fillMaxWidth()
+            .padding(vertical = 3.dp)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(vertical = 10.dp),
+            .border(1.dp, BORDER)
+            .background(Color.Transparent)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        BasicText("›", style = Mono.copy(color = GREEN, fontSize = 16.sp))
+        BasicText("›", style = Mono.copy(color = accent, fontSize = 16.sp))
         Spacer(Modifier.width(10.dp))
-        BasicText(
-            text = app.label,
-            maxLines = 1,
-            style = TextStyle(color = TEXT, fontSize = 16.sp),
-        )
+        BasicText(text = app.label, maxLines = 1, style = TextStyle(color = TEXT, fontSize = 16.sp), modifier = Modifier.weight(1f))
     }
 }
 
@@ -1488,10 +1855,47 @@ private fun AppGridCell(
                 modifier = Modifier.size(42.dp),
             )
         } ?: Spacer(Modifier.size(42.dp))
-        BasicText(
-            text = app.label,
-            maxLines = 1,
-            style = TextStyle(color = TEXT, fontSize = 12.sp),
-        )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+            BasicText(text = app.label, maxLines = 1, style = TextStyle(color = TEXT, fontSize = 12.sp))
+        }
     }
+}
+
+@Composable
+private fun AppActionDialog(
+    app: AppEntry,
+    isFavorite: Boolean,
+    isHidden: Boolean,
+    onDismiss: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onAppInfo: () -> Unit,
+    onToggleHidden: () -> Unit,
+) {
+    val accent = LocalAccent.current
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, accent)
+                .background(Color(0xFF101318))
+                .padding(16.dp),
+        ) {
+            BasicText(app.label, style = Mono.copy(color = accent, fontSize = 16.sp, fontWeight = FontWeight.Bold))
+            BasicText(app.packageName, style = Mono.copy(color = DIM, fontSize = 11.sp))
+            Spacer(Modifier.height(12.dp))
+            AppActionOption(if (isFavorite) "REMOVE FROM FAVORITES" else "ADD TO FAVORITES", onToggleFavorite)
+            AppActionOption("APP INFO", onAppInfo)
+            AppActionOption(if (isHidden) "UNHIDE APP" else "HIDE APP", onToggleHidden)
+            AppActionOption("CANCEL", onDismiss)
+        }
+    }
+}
+
+@Composable
+private fun AppActionOption(label: String, onClick: () -> Unit) {
+    BasicText(
+        text = label,
+        style = Mono.copy(color = LocalAccent.current, fontSize = 13.sp),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 11.dp),
+    )
 }
