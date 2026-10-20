@@ -1,4 +1,4 @@
-package com.llewtonsi.vixlauncher
+package com.llewtonsi.aneonyx
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows

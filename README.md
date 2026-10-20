@@ -1,13 +1,13 @@
-# ⌘ VixLauncher
+# ⌘ Aneonyx
 
 A minimal Android home launcher with a **clean, terminal-style interface**.
 
-VixLauncher brings a shell-like prompt, a searchable text-first app list, a collapsible system readout, and your blurred wallpaper to your Android home screen. The prompt uses the device's available user and device names instead of a hard-coded identity. The terminal accepts VixLauncher's built-in commands; it is not an unrestricted Android or Linux shell.
+Aneonyx brings a shell-like prompt, a searchable text-first app list, a collapsible system readout, and your blurred wallpaper to your Android home screen. The prompt uses the device's available user and device names instead of a hard-coded identity. The terminal accepts Aneonyx's built-in commands; it is not an unrestricted Android or Linux shell.
 
 **Current release:** 1.0.1 (version code 2) · **Minimum Android version:** Android 6.0 (API 23)
 
 <p align="center">
-  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="VixLauncher app icon" width="144">
+  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="Aneonyx app icon" width="144">
 </p>
 
 > **A focused, text-first home screen for Android.**
@@ -22,7 +22,7 @@ VixLauncher brings a shell-like prompt, a searchable text-first app list, a coll
 * Text-first app rows without app icons
 * Live app count and a search field for filtering installed apps
 * Local terminal commands from the search field: `/clear`, `/free`, `/apps`, `/refresh`, `/battery`, `/uptime`, `/version`, `/ps`, `/kill`, `/pwd`, `/mkdir`, `/rmdir`, `/rm`, `/find`, `/open`, `/uninstall`, `/grep`, `/calc`, `/time`, `/sysinfo`, `/pkg`, `/clip`, `/dnd`, `/ls`, `/cd`, `/cat`, `/history`, `/layout`, and `/help`
-* Terminal output retains up to 20 command results and 8,000 characters per result; `/clear` clears it and `/free` reports VixLauncher's managed heap usage without forcing garbage collection
+* Terminal output retains up to 20 command results and 8,000 characters per result; `/clear` clears it and `/free` reports Aneonyx's managed heap usage without forcing garbage collection
 * A bounded file browser for storage locations Android makes available to the app: `/ls [subfolder]`, `/cd <directory>`, `/pwd`, `/mkdir <directory>`, `/rmdir --confirm <directory>`, `/rm --confirm <file>`, `/find <query>`, `/grep <pattern> <file>`, and `/cat <filename>` (text reads capped at 1 MiB)
 * The last 20 successful slash commands persist locally; `/history clear` deletes the saved history
 * `/layout grid` and `/layout list` switch between a three-column app grid and the compact list, with the choice saved across launches
@@ -55,15 +55,15 @@ Android's scoped-storage rules may prevent direct file access to shared storage 
 
 ## 📱 Install on Android
 
-Download the signed APK from the [latest GitHub Release](https://github.com/llewtonsi/vixlauncher/releases/latest) and open it on your phone. Android may ask you to allow installs from that source. The APK is distributed directly; VixLauncher is not currently published on Google Play.
+Download the signed APK from the [latest GitHub Release](https://github.com/llewtonsi/vixlauncher/releases/latest) and open it on your phone. Android may ask you to allow installs from that source. The APK is distributed directly; Aneonyx is not currently published on Google Play.
 
-Then make VixLauncher your home app:
+Then make Aneonyx your home app:
 
 1. Open **Settings** on your phone.
 2. Go to **Apps → Default apps → Home app**. Menu names can vary by device.
-3. Select **VixLauncher**.
+3. Select **Aneonyx**.
 
-The Android application ID is `com.llewtonsi.vixlauncher`. Builds using the earlier placeholder ID install as a separate app; their private preferences are not migrated to this ID.
+The Android application ID is `com.llewtonsi.aneonyx`. Builds using the earlier placeholder ID install as a separate app; their private preferences are not migrated to this ID.
 
 Press the Home button to use it. You can switch back to another launcher from the same setting.
 
@@ -88,7 +88,7 @@ cd vixlauncher
 The product-named debug APK is created at:
 
 ```text
-app/build/outputs/vixlauncher/VixLauncher.apk
+app/build/outputs/aneonyx/Aneonyx.apk
 ```
 
 Gradle also keeps its standard debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
@@ -102,7 +102,7 @@ The current build targets API 35 and is not ready for Google Play submission. Go
 To install the generated APK on a connected device with USB debugging enabled:
 
 ```bash
-adb install -r app/build/outputs/vixlauncher/VixLauncher.apk
+adb install -r app/build/outputs/aneonyx/Aneonyx.apk
 ```
 
 You can also open the project in Android Studio, sync Gradle, and run the `app` configuration on a connected phone or emulator.
@@ -128,12 +128,12 @@ Please make sure you have permission to contribute any code or assets you submit
 
 ## 📜 License and usage
 
-VixLauncher is provided under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**, the same license used by [Veinfall](https://github.com/llewtonsi/veinfall).
+Aneonyx is provided under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**, the same license used by [Veinfall](https://github.com/llewtonsi/veinfall).
 
-Under its terms, you may study, modify, and share VixLauncher for non-commercial purposes. **Commercial use, including selling the app or using it for a commercial purpose, requires separate permission from the copyright holder.** Third-party dependencies remain under their own licenses.
+Under its terms, you may study, modify, and share Aneonyx for non-commercial purposes. **Commercial use, including selling the app or using it for a commercial purpose, requires separate permission from the copyright holder.** Third-party dependencies remain under their own licenses.
 
 This is source-available software under a non-commercial license, rather than open source under the standard Open Source Definition, because commercial use is restricted. Read the full [LICENSE](LICENSE) for the applicable terms.
 
 ---
 
-⭐ **Thanks for checking out VixLauncher!**
+⭐ **Thanks for checking out Aneonyx!**

@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "VixLauncher"
+rootProject.name = "Aneonyx"
 include(":app")

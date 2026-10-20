@@ -1,4 +1,4 @@
-package com.llewtonsi.vixlauncher
+package com.llewtonsi.aneonyx
 
 import android.app.ActivityManager
 import android.app.NotificationManager
@@ -164,7 +164,7 @@ private val COMMAND_HELP = """AVAILABLE COMMANDS
 /clear
   Clear the terminal output.
 /free
-  Show VixLauncher's managed heap usage. Android manages garbage collection automatically.
+  Show Aneonyx's managed heap usage. Android manages garbage collection automatically.
 /apps [query]
   List up to 100 launchable apps, optionally filtered by label or package name.
 /refresh
@@ -174,7 +174,7 @@ private val COMMAND_HELP = """AVAILABLE COMMANDS
 /uptime
   Show how long the device has been running since its last boot.
 /version
-  Show VixLauncher and Android version information.
+  Show Aneonyx and Android version information.
 /time
   Show the current local time.
 /sysinfo
@@ -220,7 +220,7 @@ private val HELP_COMMAND_TOKENS = listOf(
     "/ls", "/pwd", "/mkdir", "/rmdir", "/rm", "/find", "/grep", "/calc", "/ps", "/kill", "/open", "/uninstall", "/cd", "/cat", "/history", "/layout", "/help",
 )
 
-private const val PREFS_NAME = "vixlauncher_preferences"
+private const val PREFS_NAME = "aneonyx_preferences"
 private const val PREF_COMMAND_HISTORY = "command_history"
 private const val PREF_GRID_LAYOUT = "grid_layout"
 private const val MAX_COMMAND_HISTORY = 20
@@ -409,7 +409,7 @@ private fun deviceUptime(): String {
 private fun appVersion(ctx: Context): String {
     @Suppress("DEPRECATION")
     val versionName = ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "unknown"
-    return "VixLauncher $versionName\nAndroid ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
+    return "Aneonyx $versionName\nAndroid ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
 }
 
 private fun clipboardCommand(ctx: Context, argument: String): String {
@@ -444,7 +444,7 @@ private fun dndCommand(ctx: Context, argument: String): String {
     if (!notificationManager.isNotificationPolicyAccessGranted) {
         return try {
             ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
-            "Grant VixLauncher notification-policy access, then run /dnd again."
+            "Grant Aneonyx notification-policy access, then run /dnd again."
         } catch (_: Exception) {
             "Couldn't open notification-policy settings. Open them from Android Settings."
         }
@@ -575,7 +575,7 @@ private suspend fun executeLocalCommand(
                     val runtime = Runtime.getRuntime()
                     val usedMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
                     val maxMb = runtime.maxMemory() / (1024 * 1024)
-                    CommandResult("VixLauncher heap: ${usedMb} MiB used / ${maxMb} MiB max. Android manages garbage collection automatically.")
+                    CommandResult("Aneonyx heap: ${usedMb} MiB used / ${maxMb} MiB max. Android manages garbage collection automatically.")
                 }
             }
             "apps" -> {
@@ -751,10 +751,10 @@ private suspend fun executeLocalCommand(
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (exception: SecurityException) {
-        Log.w("VixLauncher", "Command denied by Android (${exception.javaClass.simpleName})")
+        Log.w("Aneonyx", "Command denied by Android (${exception.javaClass.simpleName})")
         CommandResult("Permission denied. Check Android settings and try again.", false)
     } catch (exception: Exception) {
-        Log.e("VixLauncher", "Local command failed (${exception.javaClass.simpleName})")
+        Log.e("Aneonyx", "Local command failed (${exception.javaClass.simpleName})")
         CommandResult("Command failed because an Android system service was unavailable.", false)
     }
 }
@@ -1144,7 +1144,7 @@ private fun LauncherScreen(lifecycleOwner: LifecycleOwner, homeSignal: Int) {
                 withStyle(SpanStyle(color = TEXT)) { append("┌──") }
                 withStyle(SpanStyle(color = GREEN)) { append(prompt.username) }
                 withStyle(SpanStyle(color = DIM)) { append("@${prompt.deviceName} in ") }
-                withStyle(SpanStyle(color = CYAN)) { append("VixLauncher") }
+                withStyle(SpanStyle(color = CYAN)) { append("Aneonyx") }
             },
             style = Mono.copy(fontSize = 14.sp),
         )

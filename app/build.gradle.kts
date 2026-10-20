@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.llewtonsi.vixlauncher"
+    namespace = "com.llewtonsi.aneonyx"
     compileSdk = 35
 
     compileOptions {
@@ -14,7 +14,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.llewtonsi.vixlauncher"
+        applicationId = "com.llewtonsi.aneonyx"
         minSdk = 23
         targetSdk = 35
         versionCode = 2
@@ -42,8 +42,8 @@ android {
 // product-named APK that is easier to find and share.
 val copyDebugApk = tasks.register<Copy>("copyDebugApk") {
     from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
-    into(layout.buildDirectory.dir("outputs/vixlauncher"))
-    rename { "VixLauncher.apk" }
+    into(layout.buildDirectory.dir("outputs/aneonyx"))
+    rename { "Aneonyx.apk" }
 }
 
 tasks.configureEach {
