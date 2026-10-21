@@ -17,7 +17,6 @@ Aneonyx brings a shell-like prompt, a searchable text-first app list, a collapsi
 <p align="center">
   <img src="screenshots/home-grid.jpg" alt="Aneonyx home screen in grid mode" width="220">
   <img src="screenshots/cli-system-panel.jpg" alt="CLI mode with the system telemetry panel open" width="220">
-  <img src="screenshots/cli-help.jpg" alt="CLI mode displaying the built-in help command" width="220">
   <img src="screenshots/home-list.jpg" alt="Aneonyx home screen in list mode" width="220">
 </p>
 
